@@ -24,3 +24,6 @@ Not done: not yet wired into `Editor`/UI (stage 5); rustfmt/clippy not installed
 `Editor` routes `.docx` through `fileio` into buffer + rich layer; Alt+1/2/3 toggle bold/italic/underline (selection or typing state, undoable); Ctrl+R inserts a PNG/JPEG shown as `[image: name]`; UI renders styles via SGR attrs, shortcut bar/help/README updated.
 Tested with 123 unit tests (action sequences open→style→image→save→reload, undo alignment, render attrs/placeholder, keys) and 9 pty e2e tests, including docx edit + PNG insert + save + re-read.
 Not done: rustfmt/clippy not installed, so lint is unverified.
+
+## Stage 6: CI workflow definition (request #2)
+Added docs/ci/github-actions.yml (build + cargo test on push/PR, cargo cache), README section and CLAUDE.md note on installing it to .github/workflows/ci.yml. Tested by running its commands locally (build, test pass). YAML was checked by eye only (no YAML parser available).

@@ -45,6 +45,6 @@ See docs/requests/1-zengin-metin-belgelerinide-a-mak-istiyor.md.
 
 ## Stage 6: CI workflow definition (request #2)
 Goal: a ready-to-install GitHub Actions workflow running `cargo test`, kept at `docs/ci/github-actions.yml` (agents may not write `.github/`; maintainer copies it to `.github/workflows/ci.yml`).
-- [ ] Workflow file, README section, CLAUDE.md note; `.workploy/ci.yml` already runs build + test
+- [x] Workflow file, README section, CLAUDE.md note; `.workploy/ci.yml` already runs build + test
 Acceptance: YAML is valid; its commands pass locally; `.github/` untouched.
 See docs/requests/2-ci-tan-m-ekle.md.
