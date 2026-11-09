@@ -24,10 +24,10 @@ events that edits and saves a file.
 
 ## Stage 3: Search, replace, goto, help and options
 Goal: feature parity for everyday nano use.
-- [ ] Search/replace prompts (Ctrl+W, Ctrl+\, Alt+W repeat, case/backwards toggles) with highlight of match
-- [ ] Goto line[,col] (Ctrl+_), cursor position (Ctrl+C), mark/selection rendering (Ctrl+6)
-- [ ] Undo/redo keys (Alt+U / Alt+E), cut/paste keys (Ctrl+K/U)
-- [ ] Help screen (Ctrl+G), `-l`, `-T`, `-E` options
-- [ ] README with usage and key table
+- [x] Search/replace prompts (Ctrl+W, Ctrl+\, Alt+W repeat, case/backwards toggles) with highlight of match
+- [x] Goto line[,col] (Ctrl+_), cursor position (Ctrl+C), mark/selection rendering (Ctrl+6)
+- [x] Undo/redo keys (Alt+U / Alt+E), cut/paste keys (Ctrl+K/U)
+- [x] Help screen (Ctrl+G), `-l`, `-T`, `-E` options
+- [x] README with usage and key table
 Acceptance: tests for prompt state machine and each option; scripted end-to-end scenario covering
 search+replace+save; `cargo clippy -- -D warnings` and `cargo fmt --check` pass.
