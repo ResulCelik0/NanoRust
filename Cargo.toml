@@ -1,0 +1,17 @@
+[package]
+name = "nanorust"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust clone of the nano editor"
+
+[lib]
+name = "nanorust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nanorust"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.27"
+unicode-width = "0.1"
