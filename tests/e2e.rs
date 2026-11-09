@@ -121,3 +121,67 @@ fn plus_line_positions_cursor() {
     assert!(ok);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "one\nXtwo\nthree\n");
 }
+
+#[test]
+fn search_replace_goto_cut_paste_undo_save() {
+    if !have_script() {
+        return;
+    }
+    let f = tmpdir("scenario").join("a.txt");
+    std::fs::write(&f, "alpha beta\nbeta gamma\nline three\nlast\n").unwrap();
+    let ok = drive(
+        &[f.to_str().unwrap()],
+        &[
+            b"\x17", // Ctrl+W search
+            b"gamma\r", // find it (cursor leaves line 1)
+            b"\x1f1\r", // goto line 1
+            b"\x1c", // replace
+            b"beta\r",
+            b"BETA\r",
+            b"a", // replace all
+            b"\x1f3\r", // goto line 3
+            b"\x0b", // Ctrl+K cut "line three"
+            b"\x1f1\r", // goto line 1
+            b"\x15", // Ctrl+U paste above line 1
+            b"\x1bu", // Alt+U undo the paste
+            b"\x0f",
+            b"\r",
+            b"\x18",
+        ],
+    );
+    assert!(ok);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "alpha BETA\nBETA gamma\nlast\n"
+    );
+}
+
+#[test]
+fn tabs_to_spaces_option() {
+    if !have_script() {
+        return;
+    }
+    let f = tmpdir("etabs").join("a.txt");
+    std::fs::write(&f, "x\n").unwrap();
+    let ok = drive(
+        &["-E", "-T", "4", f.to_str().unwrap()],
+        &[b"\t", b"\x0f", b"\r", b"\x18"],
+    );
+    assert!(ok);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "    x\n");
+}
+
+#[test]
+fn line_numbers_option_edits_normally() {
+    if !have_script() {
+        return;
+    }
+    let f = tmpdir("lnum").join("a.txt");
+    std::fs::write(&f, "one\ntwo\n").unwrap();
+    let ok = drive(
+        &["-l", "+2", f.to_str().unwrap()],
+        &[b"X", b"\x0f", b"\r", b"\x18"],
+    );
+    assert!(ok);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "one\nXtwo\n");
+}
