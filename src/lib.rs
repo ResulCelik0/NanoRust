@@ -7,4 +7,5 @@ pub mod fileio;
 pub mod keys;
 pub mod search;
 pub mod term;
+pub mod ui;
 pub mod undo;
