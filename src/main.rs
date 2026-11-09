@@ -47,13 +47,14 @@ fn main() -> ExitCode {
         }
         Parsed::Run(o) => o,
     };
-    let ed = match Editor::open(Path::new(&opts.file), opts.line) {
+    let mut ed = match Editor::open(Path::new(&opts.file), opts.line) {
         Ok(ed) => ed,
         Err(e) => {
             eprintln!("nanorust: {}: {e}", opts.file);
             return ExitCode::from(1);
         }
     };
+    ed.configure(opts.tab_size, opts.tabs_to_spaces, opts.line_numbers);
     install_panic_hook();
     match run(ed) {
         Ok(()) => ExitCode::SUCCESS,

@@ -70,6 +70,9 @@ pub struct Editor {
     pub left_col: usize,
     /// Text area size `(columns, rows)`.
     viewport: (usize, usize),
+    tab_size: usize,
+    tabs_to_spaces: bool,
+    line_numbers: bool,
 }
 
 impl Default for Editor {
@@ -101,7 +104,85 @@ impl Editor {
             top_line: 0,
             left_col: 0,
             viewport: (80, 24 - CHROME_ROWS),
+            tab_size: 8,
+            tabs_to_spaces: false,
+            line_numbers: false,
         }
+    }
+
+    // ---- display options ----
+
+    /// Applies command-line display options.
+    pub fn configure(&mut self, tab_size: Option<usize>, tabs_to_spaces: bool, numbers: bool) {
+        self.tab_size = tab_size.unwrap_or(8).max(1);
+        self.tabs_to_spaces = tabs_to_spaces;
+        self.line_numbers = numbers;
+    }
+
+    /// Tab stop width in columns.
+    pub fn tab_size(&self) -> usize {
+        self.tab_size
+    }
+
+    /// Whether Tab inserts spaces.
+    pub fn tabs_to_spaces(&self) -> bool {
+        self.tabs_to_spaces
+    }
+
+    /// Whether the line-number gutter is shown.
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
+    }
+
+    /// Whether the full-screen help is showing (any key dismisses it).
+    pub fn help_visible(&self) -> bool {
+        self.help
+    }
+
+    /// Shows or hides the help screen.
+    pub fn set_help_visible(&mut self, v: bool) {
+        self.help = v;
+    }
+
+    /// Selection as ordered `(start, end)` char positions, if any.
+    pub fn selection_range(&self) -> Option<(Pos, Pos)> {
+        self.buffer.selection_range()
+    }
+
+    /// Current search match to highlight, as ordered `(start, end)` char positions.
+    pub fn match_range(&self) -> Option<(Pos, Pos)> {
+        self.current_match()
+    }
+
+    /// Sets (or clears) the highlighted search match.
+    pub fn set_match_range(&mut self, r: Option<(Pos, Pos)>) {
+        self.current_match = r.map(|(a, b)| Match {
+            start: a,
+            len: b.1.saturating_sub(a.1),
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mark_for_test(&mut self) {
+        self.buffer.set_mark();
+    }
+
+    fn insert_tab(&mut self) -> Option<Edit> {
+        if !self.tabs_to_spaces {
+            return self.buffer.insert_char('\t');
+        }
+        let (l, c) = self.buffer.cursor();
+        let line = self.buffer.line(l).unwrap_or("");
+        let mut col = 0;
+        for ch in line.chars().take(c) {
+            col += if ch == '\t' {
+                self.tab_size - col % self.tab_size
+            } else {
+                unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
+            };
+        }
+        let n = self.tab_size - col % self.tab_size;
+        self.buffer.insert_str(&" ".repeat(n))
     }
 
     /// Opens `path` (a missing file gives an empty new buffer named `path`),
@@ -164,10 +245,6 @@ impl Editor {
             PromptKind::Goto => "Enter line number, column number".to_string(),
         })
     }
-    /// Whether the help screen is showing.
-    pub fn help_visible(&self) -> bool {
-        self.help
-    }
     /// The current search match as an ordered `(start, end)` range, for highlighting.
     pub fn current_match(&self) -> Option<(Pos, Pos)> {
         self.current_match.map(|m| (m.start, m.end()))
@@ -175,10 +252,6 @@ impl Editor {
     /// Where the mark was set, if it is.
     pub fn mark_anchor(&self) -> Option<Pos> {
         self.buffer.mark()
-    }
-    /// The selected range as an ordered `(start, end)`, if any.
-    pub fn selection(&self) -> Option<(Pos, Pos)> {
-        self.buffer.selection_range()
     }
     /// Whether searches are case sensitive.
     pub fn case_sensitive(&self) -> bool {
@@ -290,7 +363,7 @@ impl Editor {
                 self.record(e);
             }
             Action::Tab => {
-                let e = self.buffer.insert_char('\t');
+                let e = self.insert_tab();
                 self.record(e);
             }
             Action::Newline => {
@@ -1046,10 +1119,10 @@ mod tests {
         assert_eq!(ed.status(), Some("Mark Set"));
         ed.handle(Action::Right);
         ed.handle(Action::Right);
-        assert_eq!(ed.selection(), Some(((0, 0), (0, 2))));
+        assert_eq!(ed.selection_range(), Some(((0, 0), (0, 2))));
         ed.handle(Action::Mark);
         assert_eq!(ed.mark_anchor(), None);
-        assert_eq!(ed.selection(), None);
+        assert_eq!(ed.selection_range(), None);
         ed.handle(Action::Mark);
         ed.handle(Action::Left);
         ed.handle(Action::Cut);

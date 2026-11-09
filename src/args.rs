@@ -208,4 +208,28 @@ mod tests {
         assert!(matches!(run(&["-T", "0", "f"]), Parsed::Error(_)));
         assert!(matches!(run(&["--tabsize=z", "f"]), Parsed::Error(_)));
     }
+
+    #[test]
+    fn each_option_alone() {
+        assert!(matches!(run(&["-l", "f"]), Parsed::Run(o) if o.line_numbers && !o.tabs_to_spaces));
+        assert!(matches!(run(&["--linenumbers", "f"]), Parsed::Run(o) if o.line_numbers));
+        assert!(matches!(run(&["-E", "f"]), Parsed::Run(o) if o.tabs_to_spaces));
+        assert!(matches!(run(&["--tabstospaces", "f"]), Parsed::Run(o) if o.tabs_to_spaces));
+        assert!(matches!(run(&["--tabsize", "3", "f"]), Parsed::Run(o) if o.tab_size == Some(3)));
+    }
+
+    #[test]
+    fn tab_errors() {
+        for bad in [&["-T", "-2", "f"][..], &["-T", "x", "f"], &["--tabsize=", "f"], &["-T", ""], &["--tabsize"]] {
+            assert!(matches!(run(bad), Parsed::Error(_)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn help_mentions_options() {
+        let h = help_text();
+        for o in ["-l, --linenumbers", "-T, --tabsize=N", "-E, --tabstospaces"] {
+            assert!(h.contains(o), "{o}");
+        }
+    }
 }
