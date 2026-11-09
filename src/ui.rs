@@ -10,6 +10,7 @@ use crossterm::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::editor::{Editor, CHROME_ROWS};
+use crate::rich::Style;
 
 /// Display width of a tab stop.
 pub const TAB_WIDTH: usize = 8;
@@ -40,6 +41,9 @@ pub struct Screen {
     pub cursor: (usize, usize),
     /// Per row: highlighted display-column ranges `(start, end, kind)`, end exclusive.
     pub highlights: Vec<Vec<(usize, usize, Highlight)>>,
+    /// Per row: display-column ranges `(start, end, style)` drawn bold/italic/underlined
+    /// (rich documents), end exclusive; only non-empty styles are listed.
+    pub attrs: Vec<Vec<(usize, usize, Style)>>,
     pub width: usize,
     pub height: usize,
 }
@@ -129,6 +133,68 @@ fn visible_slice(line: &str, left: usize, cols: usize, tab: usize) -> String {
     out
 }
 
+/// A buffer line as displayed: image chars expanded to `[image: name]`.
+struct DisplayLine {
+    text: String,
+    /// Style per displayed char (empty when the document has no styles).
+    styles: Vec<Style>,
+    /// Displayed char index for each raw char index (one extra entry for the end).
+    map: Vec<usize>,
+}
+
+fn display_line(ed: &Editor, li: usize) -> DisplayLine {
+    let line = ed.buffer().line(li).unwrap_or("");
+    let rich = ed.rich();
+    let mut d = DisplayLine {
+        text: String::new(),
+        styles: Vec::new(),
+        map: Vec::new(),
+    };
+    let mut n = 0;
+    for (i, c) in line.chars().enumerate() {
+        d.map.push(n);
+        let style = rich
+            .and_then(|r| r.style_at((li, i)))
+            .unwrap_or(Style::NONE);
+        let mut put = |ch: char, d: &mut DisplayLine| {
+            d.text.push(ch);
+            d.styles.push(style);
+            n += 1;
+        };
+        match rich.and_then(|r| r.images.get(c)) {
+            Some(img) => {
+                for ch in format!("[image: {}]", img.name).chars() {
+                    // Names come from file names; keep the placeholder printable.
+                    put(if ch.is_control() { '?' } else { ch }, &mut d);
+                }
+            }
+            None => put(c, &mut d),
+        }
+    }
+    d.map.push(n);
+    d
+}
+
+/// Style runs of `dl` as display-column ranges relative to `left`, clipped to `[0, cols)`.
+fn style_runs(dl: &DisplayLine, left: usize, cols: usize, tab: usize) -> Vec<(usize, usize, Style)> {
+    let mut runs: Vec<(usize, usize, Style)> = Vec::new();
+    let mut col = 0;
+    for (c, st) in dl.text.chars().zip(&dl.styles) {
+        let w = char_cols(c, col, tab);
+        let (a, b) = (col.max(left) - left, (col + w).saturating_sub(left));
+        col += w;
+        let b = b.min(cols);
+        if st.is_empty() || a >= b {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(last) if last.1 == a && last.2 == *st => last.1 = b,
+            _ => runs.push((a, b, *st)),
+        }
+    }
+    runs
+}
+
 /// Sizes the editor viewport for a `width` x `height` terminal and scrolls so the
 /// cursor is visible. `left_col` is interpreted as a display column here.
 pub fn prepare(ed: &mut Editor, width: usize, height: usize) {
@@ -136,7 +202,8 @@ pub fn prepare(ed: &mut Editor, width: usize, height: usize) {
     let cols = width.saturating_sub(gutter_width(ed)).max(1);
     ed.set_viewport(cols, rows);
     let (l, c) = ed.buffer().cursor();
-    let dc = display_col(ed.buffer().line(l).unwrap_or(""), c, ed.tab_size());
+    let dl = display_line(ed, l);
+    let dc = display_col(&dl.text, dl.map.get(c).copied().unwrap_or(c), ed.tab_size());
     if l < ed.top_line {
         ed.top_line = l;
     } else if l >= ed.top_line + rows {
@@ -155,6 +222,9 @@ fn title_text(ed: &Editor) -> String {
         env!("CARGO_PKG_VERSION"),
         ed.title_name()
     );
+    if ed.is_rich() {
+        s.push_str(" (docx)");
+    }
     if ed.modified() {
         s.push_str("   Modified");
     }
@@ -172,7 +242,7 @@ const SHORTCUTS: [[(&str, &str); 6]; 2] = [
     ],
     [
         ("^X", "Exit"),
-        ("^R", "Read File"),
+        ("^R", "Insert Image"),
         ("^\\", "Replace"),
         ("^U", "Paste"),
         ("^_", "Go To Line"),
@@ -205,6 +275,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
     let mut inverse = Vec::with_capacity(height);
     let mut cursor = (0, 0);
     let mut highlights: Vec<Vec<(usize, usize, Highlight)>> = Vec::with_capacity(height);
+    let mut attrs: Vec<Vec<(usize, usize, Style)>> = Vec::with_capacity(height);
 
     if ed.help_visible() {
         return help_screen(width, height);
@@ -218,6 +289,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         rows.push(title);
         inverse.push(true);
         highlights.push(Vec::new());
+        attrs.push(Vec::new());
         let (l, c) = ed.buffer().cursor();
         let tab = ed.tab_size();
         let gutter = gutter_width(ed).min(width);
@@ -226,7 +298,9 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         let mat = ed.match_range();
         for r in 0..text_rows {
             let li = ed.top_line + r;
-            let line = ed.buffer().line(li).unwrap_or("");
+            let dl = display_line(ed, li);
+            let line = dl.text.as_str();
+            let mut ar = Vec::new();
             let empty = li >= ed.buffer().line_count();
             let mut row = String::new();
             if gutter > 0 {
@@ -242,14 +316,19 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
                 row.push_str(&" ".repeat(tw));
             } else {
                 row.push_str(&visible_slice(line, ed.left_col, tw, tab));
+                ar = style_runs(&dl, ed.left_col, tw, tab)
+                    .into_iter()
+                    .map(|(a, b, st)| (a + gutter, b + gutter, st))
+                    .collect();
                 for (range, kind) in [(sel, Highlight::Selection), (mat, Highlight::Match)] {
                     if let Some(((al, ac), (bl, bc))) = range {
                         if li < al || li > bl {
                             continue;
                         }
                         let n = line.chars().count();
-                        let s = if li == al { ac } else { 0 };
-                        let e = if li == bl { bc } else { n };
+                        let at = |i: usize| dl.map.get(i).copied().unwrap_or(n);
+                        let s = if li == al { at(ac) } else { 0 };
+                        let e = if li == bl { at(bc) } else { n };
                         let ds = display_col(line, s.min(n), tab);
                         let de = display_col(line, e.min(n), tab);
                         let a = ds.saturating_sub(ed.left_col).min(tw);
@@ -263,8 +342,10 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
             rows.push(row);
             inverse.push(false);
             highlights.push(hl);
+            attrs.push(ar);
         }
-        let dc = display_col(ed.buffer().line(l).unwrap_or(""), c, tab);
+        let cl = display_line(ed, l);
+        let dc = display_col(&cl.text, cl.map.get(c).copied().unwrap_or(c), tab);
         let cur_row = 1 + l.saturating_sub(ed.top_line).min(text_rows.saturating_sub(1));
         let cur_col = (gutter + dc.saturating_sub(ed.left_col)).min(width.saturating_sub(1));
         cursor = (cur_col, cur_row);
@@ -272,6 +353,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         rows.push(status);
         inverse.push(false);
         highlights.push(Vec::new());
+        attrs.push(Vec::new());
         if let Some(cc) = status_cursor {
             cursor = (cc, status_row);
         }
@@ -279,6 +361,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
             rows.push(shortcut_row(i, width, ed.prompt_kind().is_some()));
             inverse.push(false);
             highlights.push(Vec::new());
+            attrs.push(Vec::new());
         }
     } else if height > 0 {
         // Too small for the text area: keep the status line, then the title, then the bar.
@@ -297,6 +380,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
             rows.push(s);
             inverse.push(i);
             highlights.push(Vec::new());
+            attrs.push(Vec::new());
         }
     }
     cursor.0 = cursor.0.min(width.saturating_sub(1));
@@ -305,16 +389,20 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         inverse,
         cursor,
         highlights,
+        attrs,
         width,
         height,
     }
 }
 
-const HELP_KEYS: [(&str, &str); 22] = [
+const HELP_KEYS: [(&str, &str); 25] = [
     ("^G", "Display this help"),
     ("^X", "Exit the editor"),
     ("^O", "Write the buffer to a file"),
-    ("^R", "Insert a file into the buffer"),
+    ("^R", "Insert an image (.docx documents)"),
+    ("M-1", "Toggle bold (.docx documents)"),
+    ("M-2", "Toggle italic (.docx documents)"),
+    ("M-3", "Toggle underline (.docx documents)"),
     ("^W", "Search for text"),
     ("^\\", "Search and replace"),
     ("^_", "Go to a line number"),
@@ -349,6 +437,7 @@ fn help_screen(width: usize, height: usize) -> Screen {
         inverse,
         cursor: (0, 0),
         highlights: vec![Vec::new(); height],
+        attrs: vec![Vec::new(); height],
         width,
         height,
     }
@@ -397,7 +486,11 @@ pub fn draw<W: Write>(out: &mut W, screen: &Screen, prev: Option<&Screen>) -> io
     for (i, row) in screen.rows.iter().enumerate() {
         let inv = screen.inverse.get(i).copied().unwrap_or(false);
         if let (true, Some(p)) = (same_size, prev) {
-            if p.rows.get(i) == Some(row) && p.inverse.get(i).copied().unwrap_or(false) == inv {
+            if p.rows.get(i) == Some(row)
+                && p.inverse.get(i).copied().unwrap_or(false) == inv
+                && p.highlights.get(i) == screen.highlights.get(i)
+                && p.attrs.get(i) == screen.attrs.get(i)
+            {
                 continue;
             }
         }
@@ -406,10 +499,11 @@ pub fn draw<W: Write>(out: &mut W, screen: &Screen, prev: Option<&Screen>) -> io
             queue!(out, SetAttribute(Attribute::Reverse))?;
         }
         let hl = screen.highlights.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        if hl.is_empty() {
+        let at = screen.attrs.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        if hl.is_empty() && at.is_empty() {
             queue!(out, Print(row))?;
         } else {
-            draw_highlighted(out, row, hl)?;
+            draw_highlighted(out, row, hl, at)?;
         }
         if inv {
             queue!(out, SetAttribute(Attribute::Reset))?;
@@ -424,35 +518,51 @@ pub fn draw<W: Write>(out: &mut W, screen: &Screen, prev: Option<&Screen>) -> io
 }
 
 /// Prints `row`, drawing the highlighted display-column ranges in reverse video
-/// (selection) or bold reverse (match).
+/// (selection) or bold reverse (match), and style runs as bold/italic/underline (SGR).
 fn draw_highlighted<W: Write>(
     out: &mut W,
     row: &str,
     hl: &[(usize, usize, Highlight)],
+    attrs: &[(usize, usize, Style)],
 ) -> io::Result<()> {
     let mut col = 0;
-    let mut cur: Option<Highlight> = None;
+    let mut cur: (Option<Highlight>, Style) = (None, Style::NONE);
     for c in row.chars() {
-        let want = hl
+        let h = hl
             .iter()
             .rev()
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|h| h.2);
+        let st = attrs
+            .iter()
+            .find(|(a, b, _)| col >= *a && col < *b)
+            .map(|a| a.2)
+            .unwrap_or(Style::NONE);
+        let want = (h, st);
         if want != cur {
             queue!(out, SetAttribute(Attribute::Reset))?;
-            match want {
+            match h {
                 Some(Highlight::Selection) => queue!(out, SetAttribute(Attribute::Reverse))?,
                 Some(Highlight::Match) => {
                     queue!(out, SetAttribute(Attribute::Reverse), SetAttribute(Attribute::Bold))?
                 }
                 None => {}
             }
+            if st.contains(Style::BOLD) {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+            if st.contains(Style::ITALIC) {
+                queue!(out, SetAttribute(Attribute::Italic))?;
+            }
+            if st.contains(Style::UNDERLINE) {
+                queue!(out, SetAttribute(Attribute::Underlined))?;
+            }
             cur = want;
         }
         queue!(out, Print(c))?;
         col += cell_width(c);
     }
-    if cur.is_some() {
+    if cur != (None, Style::NONE) {
         queue!(out, SetAttribute(Attribute::Reset))?;
     }
     Ok(())
@@ -752,6 +862,80 @@ mod tests {
             for h in 0..6 {
                 scr(&mut ed, w, h);
             }
+        }
+    }
+
+    fn tmp_png(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let d = std::env::temp_dir().join(format!("nanorust-ui-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("pic.png");
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n0000").unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn rich_attributes_and_placeholder() {
+        let (d, png) = tmp_png("attrs");
+        let mut ed = Editor::open(&d.join("n.docx"), None).unwrap();
+        ed.handle(Action::ToggleBold);
+        for c in "ab".chars() {
+            ed.handle(Action::Insert(c));
+        }
+        ed.handle(Action::ToggleBold);
+        ed.handle(Action::ToggleItalic);
+        ed.handle(Action::ToggleUnderline);
+        ed.handle(Action::Insert('c'));
+        ed.handle(Action::InsertImage);
+        for c in png.to_string_lossy().chars() {
+            ed.handle(Action::Insert(c));
+        }
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().line(0).map(|l| l.chars().count()), Some(4));
+        let s = scr(&mut ed, 60, 8);
+        assert!(s.rows[0].contains("(docx)"));
+        assert!(s.rows[1].starts_with("abc[image: pic.png]"));
+        assert_eq!(
+            s.attrs[1],
+            vec![
+                (0, 2, Style::BOLD),
+                (2, 3, Style::ITALIC.with(Style::UNDERLINE)),
+                (3, 19, Style::ITALIC.with(Style::UNDERLINE)),
+            ]
+            .into_iter()
+            .fold(Vec::new(), |mut v: Vec<(usize, usize, Style)>, r| {
+                match v.last_mut() {
+                    Some(l) if l.1 == r.0 && l.2 == r.2 => l.1 = r.1,
+                    _ => v.push(r),
+                }
+                v
+            })
+        );
+        // Cursor sits after the placeholder.
+        assert_eq!(s.cursor, (19, 1));
+        let mut out = Vec::new();
+        draw(&mut out, &s, None).unwrap();
+        let o = String::from_utf8_lossy(&out).into_owned();
+        assert!(o.contains("\x1b[1m"), "bold SGR");
+        assert!(o.contains("\x1b[3m"), "italic SGR");
+        assert!(o.contains("\x1b[4m"), "underline SGR");
+        // Plain documents produce no attributes.
+        let mut plain = ed_with("abc");
+        let s = scr(&mut plain, 30, 8);
+        assert!(s.attrs.iter().all(Vec::is_empty));
+        assert!(!s.rows[0].contains("(docx)"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shortcuts_and_help_list_rich_keys() {
+        let mut ed = ed_with("x");
+        let s = scr(&mut ed, 100, 10);
+        assert!(s.rows.iter().any(|r| r.contains("^R Insert Image")));
+        ed.set_help_visible(true);
+        let s = scr(&mut ed, 80, 40);
+        for k in ["M-1", "M-2", "M-3", "^R"] {
+            assert!(s.rows.iter().any(|r| r.contains(k)), "{k}");
         }
     }
 }

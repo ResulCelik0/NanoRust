@@ -7,8 +7,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, Edit, Pos};
+use crate::docx;
 use crate::fileio::{self, LineEnding};
 use crate::keys::Action;
+use crate::rich::{Rich, Style};
 use crate::search::{self, Match, Options};
 use crate::undo::History;
 
@@ -32,6 +34,8 @@ pub enum PromptKind {
     ReplaceConfirm,
     /// "Enter line number, column number:" input.
     Goto,
+    /// "Image file to insert:" path input (rich documents only).
+    InsertImage,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,11 @@ pub struct Editor {
     tab_size: usize,
     tabs_to_spaces: bool,
     line_numbers: bool,
+    /// Style layer and image table; `Some` for `.docx` documents.
+    rich: Option<Rich>,
+    /// Package data of the loaded docx, carried through verbatim on save.
+    docx_parts: Vec<docx::Part>,
+    docx_package: docx::Package,
 }
 
 impl Default for Editor {
@@ -107,6 +116,9 @@ impl Editor {
             tab_size: 8,
             tabs_to_spaces: false,
             line_numbers: false,
+            rich: None,
+            docx_parts: Vec::new(),
+            docx_package: docx::Package::default(),
         }
     }
 
@@ -189,6 +201,9 @@ impl Editor {
     /// optionally moving to the one-based `line`. Errors (e.g. invalid UTF-8)
     /// are returned for the caller to report.
     pub fn open(path: &Path, line: Option<usize>) -> io::Result<Editor> {
+        if fileio::is_docx_path(path) {
+            return Self::open_docx(path, line);
+        }
         let loaded = fileio::load(path)?;
         let mut ed = Editor::new();
         let n = loaded.lines.len();
@@ -208,7 +223,39 @@ impl Editor {
         Ok(ed)
     }
 
+    fn open_docx(path: &Path, line: Option<usize>) -> io::Result<Editor> {
+        let existed = path.exists();
+        let doc = fileio::load_docx(path)?;
+        let mut ed = Editor::new();
+        let n = doc.lines.len();
+        ed.buffer = Buffer::from_text(&doc.lines.join("\n"));
+        ed.rich = Some(doc.rich);
+        ed.docx_parts = doc.parts;
+        ed.docx_package = doc.package;
+        ed.path = Some(path.to_path_buf());
+        if let Some(l) = line {
+            ed.buffer.goto(l, None);
+        }
+        ed.status = Some(if existed {
+            format!("Read {n} lines")
+        } else {
+            "New File".to_string()
+        });
+        ed.scroll_to_cursor();
+        Ok(ed)
+    }
+
     // ---- read accessors ----
+
+    /// Whether this is a rich (`.docx`) document.
+    pub fn is_rich(&self) -> bool {
+        self.rich.is_some()
+    }
+
+    /// The rich layer (styles and images) of a `.docx` document.
+    pub fn rich(&self) -> Option<&Rich> {
+        self.rich.as_ref()
+    }
 
     /// The text buffer.
     pub fn buffer(&self) -> &Buffer {
@@ -243,6 +290,7 @@ impl Editor {
             PromptKind::ReplaceWith => "Replace with".to_string(),
             PromptKind::ReplaceConfirm => "Replace this instance? (Y/N/A/Esc)".to_string(),
             PromptKind::Goto => "Enter line number, column number".to_string(),
+            PromptKind::InsertImage => "Image file to insert (PNG/JPEG)".to_string(),
         })
     }
     /// The current search match as an ordered `(start, end)` range, for highlighting.
@@ -326,9 +374,86 @@ impl Editor {
     }
 
     fn record(&mut self, e: Option<Edit>) {
-        if e.is_some() {
-            self.history.record_opt(e);
+        if let Some(e) = e {
+            let re = self.rich.as_mut().map(|r| r.apply(&e));
+            self.history
+                .record_rich_group(vec![e], re.into_iter().collect());
             self.modified = true;
+        }
+    }
+
+    /// After the cursor moved, typed text inherits the style of the text before it.
+    fn sync_pending_style(&mut self) {
+        let (l, c) = self.buffer.cursor();
+        if let Some(r) = self.rich.as_mut() {
+            let style = if c > 0 {
+                r.style_at((l, c - 1))
+            } else {
+                r.style_at((l, 0))
+            };
+            r.pending = style.unwrap_or(Style::NONE);
+        }
+    }
+
+    fn toggle_style(&mut self, flag: Style, name: &str) {
+        let sel = self.buffer.selection_range();
+        let Some(r) = self.rich.as_mut() else {
+            self.set_status("Text styles need a .docx document");
+            return;
+        };
+        match sel {
+            Some((a, b)) => {
+                if let Some(re) = r.toggle_range(a, b, flag) {
+                    self.history.record_rich_group(Vec::new(), vec![re]);
+                    self.modified = true;
+                }
+            }
+            None => {
+                let on = !r.pending.contains(flag);
+                r.pending = if on {
+                    r.pending.with(flag)
+                } else {
+                    r.pending.without(flag)
+                };
+                self.set_status(format!("{name} {}", if on { "on" } else { "off" }));
+            }
+        }
+    }
+
+    fn insert_image_from(&mut self, path_text: &str) {
+        let path = PathBuf::from(path_text.trim());
+        if path_text.trim().is_empty() {
+            self.set_status("Cancelled");
+            return;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("Error reading {}: {e}", path.display()));
+                return;
+            }
+        };
+        let content_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "image/jpeg"
+        } else {
+            self.set_status(format!("{}: not a PNG or JPEG image", path.display()));
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_string());
+        let Some(r) = self.rich.as_mut() else {
+            return;
+        };
+        match r.images.add_image(&name, bytes, content_type) {
+            Some(ch) => {
+                let e = self.buffer.insert_char(ch);
+                self.record(e);
+            }
+            None => self.set_status("Too many images in the document"),
         }
     }
 
@@ -357,7 +482,34 @@ impl Editor {
         if action != Action::RepeatSearch {
             self.current_match = None;
         }
+        let keeps_style = matches!(
+            action,
+            Action::Insert(_)
+                | Action::Tab
+                | Action::Newline
+                | Action::ToggleBold
+                | Action::ToggleItalic
+                | Action::ToggleUnderline
+                | Action::InsertImage
+        );
+        self.handle_edit_inner(action, rows);
+        if !keeps_style && self.prompt.is_none() {
+            self.sync_pending_style();
+        }
+    }
+
+    fn handle_edit_inner(&mut self, action: Action, rows: usize) {
         match action {
+            Action::ToggleBold => self.toggle_style(Style::BOLD, "Bold"),
+            Action::ToggleItalic => self.toggle_style(Style::ITALIC, "Italic"),
+            Action::ToggleUnderline => self.toggle_style(Style::UNDERLINE, "Underline"),
+            Action::InsertImage => {
+                if self.rich.is_some() {
+                    self.open_prompt(PromptKind::InsertImage);
+                } else {
+                    self.set_status("Images can only be inserted in .docx documents");
+                }
+            }
             Action::Insert(c) => {
                 let e = self.buffer.insert_char(c);
                 self.record(e);
@@ -395,14 +547,14 @@ impl Editor {
             Action::PageUp => self.buffer.page_up(rows),
             Action::PageDown => self.buffer.page_down(rows),
             Action::Undo => {
-                if self.history.undo(&mut self.buffer) {
+                if self.history.undo_rich(&mut self.buffer, self.rich.as_mut()) {
                     self.modified = true;
                 } else {
                     self.set_status("Nothing to undo");
                 }
             }
             Action::Redo => {
-                if self.history.redo(&mut self.buffer) {
+                if self.history.redo_rich(&mut self.buffer, self.rich.as_mut()) {
                     self.modified = true;
                 } else {
                     self.set_status("Nothing to redo");
@@ -587,7 +739,11 @@ impl Editor {
             }
         }
         if !group.is_empty() {
-            self.history.record_group(group);
+            let rich: Vec<_> = match self.rich.as_mut() {
+                Some(r) => group.iter().map(|e| r.apply(e)).collect(),
+                None => Vec::new(),
+            };
+            self.history.record_rich_group(group, rich);
             self.modified = true;
         }
         if self.current_match.is_none() {
@@ -645,6 +801,18 @@ impl Editor {
                 Action::Insert('n' | 'N') => {
                     self.prompt = None;
                     self.quit = true;
+                }
+                _ => {}
+            },
+            PromptKind::InsertImage => match action {
+                Action::Insert(c) => prompt.text.push(c),
+                Action::Backspace => {
+                    prompt.text.pop();
+                }
+                Action::Newline => {
+                    let text = std::mem::take(&mut prompt.text);
+                    self.prompt = None;
+                    self.insert_image_from(&text);
                 }
                 _ => {}
             },
@@ -716,7 +884,29 @@ impl Editor {
 
     fn write_to(&mut self, path: PathBuf, quit_after: bool) {
         let n = self.buffer.line_count();
-        match fileio::save(&path, self.buffer.lines(), self.line_ending, self.final_newline) {
+        let result = match (&self.rich, fileio::is_docx_path(&path)) {
+            (Some(rich), true) => {
+                let doc = docx::Document {
+                    lines: self.buffer.lines().to_vec(),
+                    rich: rich.clone(),
+                    parts: self.docx_parts.clone(),
+                    package: self.docx_package.clone(),
+                };
+                fileio::save_docx(&path, &doc)
+            }
+            (Some(_), false) => {
+                self.set_status("Rich documents can only be saved as .docx");
+                return;
+            }
+            (None, true) => {
+                self.set_status("Plain text can't be saved as .docx; open a .docx file instead");
+                return;
+            }
+            (None, false) => {
+                fileio::save(&path, self.buffer.lines(), self.line_ending, self.final_newline)
+            }
+        };
+        match result {
             Ok(()) => {
                 self.path = Some(path);
                 self.modified = false;
@@ -1143,5 +1333,176 @@ mod tests {
         ed.handle(Action::Insert('z'));
         assert!(!ed.help_visible());
         assert_eq!(ed.buffer().to_text(), "a");
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-fake-";
+
+    fn insert_image(ed: &mut Editor, path: &Path) {
+        ed.handle(Action::InsertImage);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::InsertImage));
+        type_str(ed, &path.to_string_lossy());
+        ed.handle(Action::Newline);
+    }
+
+    #[test]
+    fn docx_edit_style_image_save_reload() {
+        let d = tmpdir("docx");
+        let p = d.join("a.docx");
+        let png = d.join("pic.png");
+        fs::write(&png, PNG).unwrap();
+        let mut ed = Editor::open(&p, None).unwrap();
+        assert!(ed.is_rich());
+        assert_eq!(ed.status(), Some("New File"));
+        type_str(&mut ed, "hello");
+        ed.handle(Action::Home);
+        ed.handle(Action::Mark);
+        for _ in 0..3 {
+            ed.handle(Action::Right);
+        }
+        ed.handle(Action::ToggleBold);
+        ed.handle(Action::Mark);
+        ed.handle(Action::End);
+        type_str(&mut ed, "!");
+        insert_image(&mut ed, &png);
+        assert!(ed.modified());
+        ed.handle(Action::WriteOut);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.status(), Some("Wrote 1 lines"));
+        assert!(!ed.modified());
+
+        let ed2 = Editor::open(&p, None).unwrap();
+        assert_eq!(ed2.buffer().line(0), ed.buffer().line(0));
+        let r = ed2.rich().unwrap();
+        let st: Vec<_> = (0..4).map(|i| r.style_at((0, i)).unwrap()).collect();
+        assert_eq!(st[..3], [Style::BOLD; 3]);
+        assert_eq!(st[3], Style::NONE);
+        let img = ed2.buffer().line(0).unwrap().chars().last().unwrap();
+        assert_eq!(r.images.get(img).unwrap().bytes, PNG);
+        assert_eq!(r.images.get(img).unwrap().name, "pic.png");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docx_undo_redo_keep_styles_aligned() {
+        let d = tmpdir("docx-undo");
+        let mut ed = Editor::open(&d.join("u.docx"), None).unwrap();
+        type_str(&mut ed, "abc");
+        ed.handle(Action::Home);
+        ed.handle(Action::Mark);
+        ed.handle(Action::End);
+        ed.handle(Action::ToggleItalic);
+        let styles = |ed: &Editor| -> Vec<Style> {
+            (0..ed.buffer().line(0).unwrap().chars().count())
+                .map(|i| ed.rich().unwrap().style_at((0, i)).unwrap())
+                .collect()
+        };
+        assert_eq!(styles(&ed), vec![Style::ITALIC; 3]);
+        ed.handle(Action::Mark);
+        ed.handle(Action::Undo);
+        assert_eq!(styles(&ed), vec![Style::NONE; 3]);
+        ed.handle(Action::Redo);
+        assert_eq!(styles(&ed), vec![Style::ITALIC; 3]);
+        // Delete a styled char, undo restores its style.
+        ed.handle(Action::Home);
+        ed.handle(Action::Delete);
+        assert_eq!(styles(&ed), vec![Style::ITALIC; 2]);
+        ed.handle(Action::Undo);
+        assert_eq!(styles(&ed), vec![Style::ITALIC; 3]);
+        ed.handle(Action::Redo);
+        while ed.buffer().line(0) != Some("") {
+            ed.handle(Action::Undo);
+        }
+        type_str(&mut ed, "q");
+        assert_eq!(styles(&ed), vec![Style::NONE; 1]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn typing_state_toggle_and_inheritance() {
+        let d = tmpdir("docx-pending");
+        let mut ed = Editor::open(&d.join("t.docx"), None).unwrap();
+        ed.handle(Action::ToggleBold);
+        assert_eq!(ed.status(), Some("Bold on"));
+        type_str(&mut ed, "ab");
+        ed.handle(Action::ToggleBold);
+        type_str(&mut ed, "c");
+        let r = ed.rich().unwrap();
+        assert_eq!(r.style_at((0, 1)), Some(Style::BOLD));
+        assert_eq!(r.style_at((0, 2)), Some(Style::NONE));
+        // Moving into bold text makes typing bold again.
+        ed.handle(Action::Left);
+        ed.handle(Action::Left);
+        type_str(&mut ed, "X");
+        assert_eq!(ed.rich().unwrap().style_at((0, 1)), Some(Style::BOLD));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn image_errors_and_plain_buffers() {
+        let d = tmpdir("img-err");
+        let mut ed = Editor::open(&d.join("e.docx"), None).unwrap();
+        let txt = d.join("not.png");
+        fs::write(&txt, "hello").unwrap();
+        insert_image(&mut ed, &txt);
+        assert!(ed.status().unwrap().contains("not a PNG or JPEG"));
+        insert_image(&mut ed, &d.join("missing.png"));
+        assert!(ed.status().unwrap().starts_with("Error reading"));
+        assert!(!ed.modified());
+        let jpg = d.join("p.jpg");
+        fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0xE0, 0]).unwrap();
+        insert_image(&mut ed, &jpg);
+        assert!(ed.modified());
+        // Undo removes the placeholder.
+        ed.handle(Action::Undo);
+        assert_eq!(ed.buffer().line(0), Some(""));
+        // Plain buffers refuse images and styles.
+        let mut plain = Editor::new();
+        plain.handle(Action::InsertImage);
+        assert_eq!(plain.prompt_kind(), None);
+        assert!(plain.status().unwrap().contains(".docx"));
+        plain.handle(Action::ToggleBold);
+        assert!(plain.status().is_some());
+        assert!(!plain.modified());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn corrupt_docx_open_errors_and_plain_save_guard() {
+        let d = tmpdir("docx-bad");
+        let p = d.join("bad.docx");
+        fs::write(&p, "just text").unwrap();
+        assert!(Editor::open(&p, None).is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "just text");
+        let mut ed = Editor::new();
+        type_str(&mut ed, "x");
+        ed.handle(Action::WriteOut);
+        type_str(&mut ed, &d.join("o.docx").to_string_lossy());
+        ed.handle(Action::Newline);
+        assert!(ed.modified());
+        assert!(!d.join("o.docx").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docx_passthrough_parts_survive_save() {
+        let d = tmpdir("docx-pass");
+        let p = d.join("p.docx");
+        let mut doc = docx::Document::new();
+        doc.parts.push(docx::Part {
+            name: "word/styles.xml".to_string(),
+            data: b"<styles/>".to_vec(),
+        });
+        fileio::save_docx(&p, &doc).unwrap();
+        let mut ed = Editor::open(&p, None).unwrap();
+        type_str(&mut ed, "z");
+        ed.handle(Action::WriteOut);
+        ed.handle(Action::Newline);
+        let back = fileio::load_docx(&p).unwrap();
+        assert_eq!(back.lines, vec!["z".to_string()]);
+        assert!(back
+            .parts
+            .iter()
+            .any(|x| x.name == "word/styles.xml" && x.data == b"<styles/>"));
+        let _ = fs::remove_dir_all(&d);
     }
 }
