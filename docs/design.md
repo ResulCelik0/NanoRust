@@ -46,3 +46,8 @@ and `docx` (read/write OOXML via `zip` + `quick-xml`; unknown package parts pass
 Plain-text editing is unchanged. Keys: Alt+1/2/3 style, Ctrl+R insert image. Details:
 docs/requests/1-zengin-metin-belgelerinide-a-mak-istiyor.md. Rich-text editing is no longer a
 non-goal; RTF/ODT, tables, and image display remain out of scope.
+
+## Continuous integration (request #2)
+`cargo build --all-targets` + `cargo test` run in CI. Workploy uses `.workploy/ci.yml`; the GitHub
+Actions equivalent lives in `docs/ci/github-actions.yml` and must be copied to
+`.github/workflows/ci.yml` by a maintainer. Details: docs/requests/2-ci-tan-m-ekle.md.
