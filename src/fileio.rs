@@ -5,6 +5,7 @@
 //! (an empty file loads as `[""]`, no final newline).
 //! Invalid UTF-8 is reported as an `InvalidData` error (never lossy).
 
+use crate::docx;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -128,15 +129,51 @@ fn write_and_rename(
     if final_newline {
         data.push_str(eol);
     }
+    write_bytes_atomic(tmp, path, data.as_bytes())
+}
+
+fn write_bytes_atomic(tmp: &Path, path: &Path, data: &[u8]) -> io::Result<()> {
     let perms = fs::metadata(path).ok().map(|m| m.permissions());
     let mut f = fs::OpenOptions::new().write(true).create_new(true).open(tmp)?;
-    f.write_all(data.as_bytes())?;
+    f.write_all(data)?;
     if let Some(p) = perms {
         f.set_permissions(p)?;
     }
     f.sync_all()?;
     drop(f);
     fs::rename(tmp, path)
+}
+
+/// True if the path has a `.docx` extension (case-insensitive).
+pub fn is_docx_path(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("docx"))
+}
+
+/// Load a `.docx` file. A missing file yields an empty document. The file must start with the
+/// zip magic and contain `word/document.xml`; otherwise an `InvalidData` error is returned.
+pub fn load_docx(path: &Path) -> io::Result<docx::Document> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(docx::Document::new()),
+        Err(e) => return Err(e),
+    };
+    if !(bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06")) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a docx file (missing zip signature)"));
+    }
+    Ok(docx::read(&bytes)?)
+}
+
+/// Atomically save a document as `.docx` (temp file + rename). The package is built in memory
+/// first, so a failure never touches the target. Passthrough parts come from `doc.parts`,
+/// i.e. from the originally loaded document.
+pub fn save_docx(path: &Path, doc: &docx::Document) -> io::Result<()> {
+    let data = docx::write(doc)?;
+    let tmp = temp_path(path);
+    let result = write_bytes_atomic(&tmp, path, &data);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -289,5 +326,61 @@ mod tests {
         fs::write(p.join("x"), "x").unwrap();
         assert!(save(&p, &v(&["a"]), LineEnding::Lf, true).is_err());
         assert_eq!(fs::read_dir(&d.0).unwrap().count(), 1);
+    }
+
+    fn sample_doc() -> docx::Document {
+        let mut d = docx::Document::new();
+        d.lines = v(&["héllo <&>", "", "日本\tx"]);
+        let mut rich = crate::rich::Rich::from_text(&d.lines.join("\n"));
+        rich.set_line_styles(0, vec![crate::rich::Style::BOLD; 9]);
+        d.rich = rich;
+        d.parts.push(docx::Part { name: "word/styles.xml".into(), data: vec![0, 1, 2, 255] });
+        d
+    }
+
+    #[test]
+    fn docx_path_detection() {
+        assert!(is_docx_path(Path::new("a.docx")));
+        assert!(is_docx_path(Path::new("a.DOCX")));
+        assert!(!is_docx_path(Path::new("a.doc")));
+        assert!(!is_docx_path(Path::new("docx")));
+    }
+
+    #[test]
+    fn docx_save_load_and_passthrough() {
+        let d = Dir::new("docx");
+        let p = d.file("a.docx");
+        let doc = sample_doc();
+        save_docx(&p, &doc).unwrap();
+        assert_eq!(fs::read_dir(&d.0).unwrap().count(), 1);
+        let l = load_docx(&p).unwrap();
+        assert_eq!(l, doc);
+        // overwrite keeps loaded parts
+        let mut l2 = l.clone();
+        l2.lines[1] = "new".into();
+        l2.rich = crate::rich::Rich::from_text(&l2.lines.join("\n"));
+        save_docx(&p, &l2).unwrap();
+        let l3 = load_docx(&p).unwrap();
+        assert_eq!(l3.lines, l2.lines);
+        assert_eq!(l3.parts, doc.parts);
+    }
+
+    #[test]
+    fn docx_missing_is_empty() {
+        let d = Dir::new("docxnew");
+        let l = load_docx(&d.file("x.docx")).unwrap();
+        assert_eq!(l, docx::Document::new());
+    }
+
+    #[test]
+    fn docx_corrupt_errors_and_is_not_overwritten() {
+        let d = Dir::new("docxbad");
+        let p = d.file("a.docx");
+        for content in [&b"hello, not a zip"[..], b"PK\x03\x04garbage garbage garbage", b""] {
+            fs::write(&p, content).unwrap();
+            let e = load_docx(&p).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read(&p).unwrap(), content);
+        }
     }
 }
