@@ -19,3 +19,8 @@ Not done: rustfmt/clippy are not installed, so lint is unverified; no test drive
 Added `zip` and `quick-xml`; `rich` (Style flags, per-line style vectors aligned via `apply(&Edit)`, `RichEdit` records for exact undo/redo incl. restored styles, range toggle, image table with U+E000+n placeholders); `docx` (`read`/`write` of text, tabs, breaks, b/i/u, inline images, verbatim passthrough of unknown parts plus package rels/content types); `fileio` `.docx` load/save (zip magic check, atomic write, corrupt input errors without overwriting).
 Tested with 114 unit tests (style alignment under edits/undo, round trips, images, passthrough, corrupt/truncated input, multibyte) plus the existing e2e tests.
 Not done: not yet wired into `Editor`/UI (stage 5); rustfmt/clippy not installed, so lint is unverified.
+
+## Stage 5: Editor and UI integration, images (request #1)
+`Editor` routes `.docx` through `fileio` into buffer + rich layer; Alt+1/2/3 toggle bold/italic/underline (selection or typing state, undoable); Ctrl+R inserts a PNG/JPEG shown as `[image: name]`; UI renders styles via SGR attrs, shortcut bar/help/README updated.
+Tested with 123 unit tests (action sequences open→style→image→save→reload, undo alignment, render attrs/placeholder, keys) and 9 pty e2e tests, including docx edit + PNG insert + save + re-read.
+Not done: rustfmt/clippy not installed, so lint is unverified.
