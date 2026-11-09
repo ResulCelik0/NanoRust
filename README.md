@@ -7,6 +7,15 @@ A small Rust clone of the nano text editor.
     cargo build --release      # binary: target/release/nanorust
     cargo test
 
+## Continuous integration
+
+A GitHub Actions workflow lives at `docs/ci/github-actions.yml`. To enable it,
+copy it to `.github/workflows/ci.yml`:
+
+    mkdir -p .github/workflows && cp docs/ci/github-actions.yml .github/workflows/ci.yml
+
+It runs `cargo build --all-targets` and `cargo test` on push and pull requests.
+
 ## Usage
 
     nanorust [OPTIONS] [+LINE] FILE
