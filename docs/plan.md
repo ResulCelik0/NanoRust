@@ -39,6 +39,6 @@ Acceptance: unit tests for style alignment under edits/undo, docx round trip, im
 
 ## Stage 5: Editor and UI integration, images (request #1)
 Goal: `nanorust file.docx` opens, edits (bold/italic/underline), inserts images and saves.
-- [ ] Editor routing, Alt+1/2/3 and Ctrl+R keys, styled rendering and image placeholder, README, CI
+- [x] Editor routing, Alt+1/2/3 and Ctrl+R keys, styled rendering and image placeholder, README, CI
 Acceptance: action-sequence, render and pty e2e tests (edit + insert PNG + save + re-read).
 See docs/requests/1-zengin-metin-belgelerinide-a-mak-istiyor.md.
