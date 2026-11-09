@@ -11,7 +11,7 @@ Rust clone of the nano editor. See docs/design.md (architecture) and docs/plan.m
 ## Conventions
 - Single crate: logic in the library (`src/lib.rs` + modules), `src/main.rs` stays thin.
 - Core modules must not touch the terminal; only `ui`/`main` use crossterm.
-- Dependencies: crossterm, unicode-width only; ask before adding more.
+- Dependencies: crossterm, unicode-width; plus zip and quick-xml (approved in request #1); ask before adding more.
 - No `unwrap()` on I/O or user input in non-test code; handle UTF-8 by char boundaries.
 - Every feature ships with tests; keep fmt and clippy clean.
 - Note: Rust toolchain may need installing (rustup via crates.io-reachable proxy or distro package) — check `cargo --version` first.
