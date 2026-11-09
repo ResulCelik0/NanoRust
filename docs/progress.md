@@ -14,3 +14,8 @@ Not done: fmt/clippy not installed, so lint is unverified; tab width fixed at 8 
 Built the prompt state machine (search/replace with case and backwards toggles, per-match Y/N/A confirm, Alt+W repeat, goto `line[,col]`, cursor position, mark), help screen, `-l`/`-T`/`-E` (line-number gutter, tab width, tabs-to-spaces), selection and match highlighting, and a README with key table.
 Tested with 97 unit tests (prompt transitions, options, render of gutter/tabs/selection/help) and 8 end-to-end pty tests, including search+replace+goto+cut/paste+undo+save.
 Not done: rustfmt/clippy are not installed, so lint is unverified; no test drives a real search through to the rendered highlight.
+
+## Stage 4: DOCX model, reader and writer (request #1)
+Added `zip` and `quick-xml`; `rich` (Style flags, per-line style vectors aligned via `apply(&Edit)`, `RichEdit` records for exact undo/redo incl. restored styles, range toggle, image table with U+E000+n placeholders); `docx` (`read`/`write` of text, tabs, breaks, b/i/u, inline images, verbatim passthrough of unknown parts plus package rels/content types); `fileio` `.docx` load/save (zip magic check, atomic write, corrupt input errors without overwriting).
+Tested with 114 unit tests (style alignment under edits/undo, round trips, images, passthrough, corrupt/truncated input, multibyte) plus the existing e2e tests.
+Not done: not yet wired into `Editor`/UI (stage 5); rustfmt/clippy not installed, so lint is unverified.

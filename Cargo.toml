@@ -15,3 +15,5 @@ path = "src/main.rs"
 [dependencies]
 crossterm = "0.27"
 unicode-width = "0.1"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.31"
