@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod buffer;
+pub mod docx;
 pub mod editor;
 pub mod fileio;
 pub mod keys;
