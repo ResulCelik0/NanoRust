@@ -13,6 +13,33 @@ A small Rust clone of the nano text editor.
 
 A missing FILE is opened as a new buffer. `+LINE` starts on that line.
 
+### Word documents (.docx)
+
+    nanorust report.docx
+
+A `.docx` file opens as rich text: one line per paragraph, with bold, italic and
+underline kept per character. A missing `.docx` is created on save. Saving
+writes the document back as `.docx`; other package parts (styles, headers, ...)
+are carried through unchanged.
+
+| Key | Action |
+|---|---|
+| Alt+1 / Alt+2 / Alt+3 | toggle bold / italic / underline on the selection, or for text typed next |
+| Ctrl+R | insert an image: prompts for a PNG or JPEG path |
+
+Images appear in the text as a single placeholder character (shown as
+`[image: name]`) that can be moved, cut, pasted and deleted like any char.
+
+Limitations for `.docx`:
+
+- Tables are flattened to text lines; cell and row structure is lost on save.
+- A soft line break (`w:br`) becomes a new paragraph; page breaks are dropped.
+- Paragraph and section properties are regenerated, not preserved; only
+  bold, italic and underline run formatting is kept.
+- Only inline PNG and JPEG images can be inserted (at most 6,400 per
+  document); text boxes and other drawings are ignored.
+- Alt+1/2/3 and Ctrl+R have no effect in plain-text files.
+
 ## Options
 
 | Option | Meaning |

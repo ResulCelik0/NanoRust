@@ -5,12 +5,20 @@
 //! a new edit clears the redo stack.
 
 use crate::buffer::{Buffer, Edit};
+use crate::rich::{Rich, RichEdit};
 
 /// Undo/redo stacks of edit groups.
 #[derive(Debug, Default, Clone)]
 pub struct History {
-    undo: Vec<Vec<Edit>>,
-    redo: Vec<Vec<Edit>>,
+    undo: Vec<Group>,
+    redo: Vec<Group>,
+}
+
+/// One undo step: buffer edits plus the matching rich-layer records (empty for plain text).
+#[derive(Debug, Default, Clone)]
+struct Group {
+    edits: Vec<Edit>,
+    rich: Vec<RichEdit>,
 }
 
 impl History {
@@ -33,11 +41,17 @@ impl History {
 
     /// Records several already-applied edits (in application order) as one step.
     pub fn record_group(&mut self, edits: Vec<Edit>) {
-        if edits.is_empty() {
+        self.record_rich_group(edits, Vec::new());
+    }
+
+    /// Records applied buffer edits together with their resolved rich-layer records
+    /// (style-only steps have no buffer edits). Nothing is recorded if both are empty.
+    pub fn record_rich_group(&mut self, edits: Vec<Edit>, rich: Vec<RichEdit>) {
+        if edits.is_empty() && rich.is_empty() {
             return;
         }
         self.redo.clear();
-        self.undo.push(edits);
+        self.undo.push(Group { edits, rich });
     }
 
     pub fn can_undo(&self) -> bool {
@@ -50,11 +64,21 @@ impl History {
 
     /// Reverts the most recent step. Returns `false` if there is nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer) -> bool {
+        self.undo_rich(buf, None)
+    }
+
+    /// Like [`History::undo`], also reverting the rich layer when there is one.
+    pub fn undo_rich(&mut self, buf: &mut Buffer, mut rich: Option<&mut Rich>) -> bool {
         let Some(group) = self.undo.pop() else {
             return false;
         };
-        for e in group.iter().rev() {
+        for e in group.edits.iter().rev() {
             buf.apply(&e.inverse());
+        }
+        if let Some(r) = rich.as_deref_mut() {
+            for re in group.rich.iter().rev() {
+                r.apply_rich(&re.inverse());
+            }
         }
         self.redo.push(group);
         true
@@ -62,11 +86,21 @@ impl History {
 
     /// Re-applies the most recently undone step. Returns `false` if none.
     pub fn redo(&mut self, buf: &mut Buffer) -> bool {
+        self.redo_rich(buf, None)
+    }
+
+    /// Like [`History::redo`], also replaying the rich layer when there is one.
+    pub fn redo_rich(&mut self, buf: &mut Buffer, mut rich: Option<&mut Rich>) -> bool {
         let Some(group) = self.redo.pop() else {
             return false;
         };
-        for e in &group {
+        for e in &group.edits {
             buf.apply(e);
+        }
+        if let Some(r) = rich.as_deref_mut() {
+            for re in &group.rich {
+                r.apply_rich(re);
+            }
         }
         self.undo.push(group);
         true

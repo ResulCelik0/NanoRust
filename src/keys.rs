@@ -59,6 +59,14 @@ pub enum Action {
     ToggleCase,
     /// Alt+B: toggle backwards search (search prompts).
     ToggleBackwards,
+    /// Alt+1: toggle bold on the selection (or for typed text).
+    ToggleBold,
+    /// Alt+2: toggle italic.
+    ToggleItalic,
+    /// Alt+3: toggle underline.
+    ToggleUnderline,
+    /// Ctrl+R: insert an image (prompts for a path; .docx documents only).
+    InsertImage,
     /// Terminal resized to `(columns, rows)`.
     Resize(u16, u16),
 }
@@ -83,6 +91,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
             'c' => Some(Action::Cancel),
             'w' => Some(Action::Search),
             'g' => Some(Action::Help),
+            'r' => Some(Action::InsertImage),
             // Terminals send Ctrl+Backslash, Ctrl+_ and Ctrl+6 as control codes that
             // crossterm reports as Ctrl+4, Ctrl+7 and Ctrl+6.
             '\\' | '4' => Some(Action::Replace),
@@ -97,6 +106,9 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
             'a' => Some(Action::Mark),
             'c' => Some(Action::ToggleCase),
             'b' => Some(Action::ToggleBackwards),
+            '1' => Some(Action::ToggleBold),
+            '2' => Some(Action::ToggleItalic),
+            '3' => Some(Action::ToggleUnderline),
             _ => None,
         },
         KeyCode::Char(c) => Some(Action::Insert(c)),
@@ -174,6 +186,19 @@ mod tests {
         assert_eq!(a('u'), Some(Action::Undo));
         assert_eq!(a('e'), Some(Action::Redo));
         assert_eq!(a('z'), None);
+    }
+
+    #[test]
+    fn rich_bindings() {
+        let a = |ch| k(KeyCode::Char(ch), KeyModifiers::ALT);
+        assert_eq!(a('1'), Some(Action::ToggleBold));
+        assert_eq!(a('2'), Some(Action::ToggleItalic));
+        assert_eq!(a('3'), Some(Action::ToggleUnderline));
+        assert_eq!(a('4'), None);
+        assert_eq!(k(KeyCode::Char('r'), C), Some(Action::InsertImage));
+        assert_eq!(k(KeyCode::Char('R'), C), Some(Action::InsertImage));
+        // Plain digits still type.
+        assert_eq!(k(KeyCode::Char('1'), N), Some(Action::Insert('1')));
     }
 
     #[test]
