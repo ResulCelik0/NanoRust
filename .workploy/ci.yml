@@ -1,0 +1,7 @@
+steps:
+  - name: build
+    run: cargo build --all-targets
+    timeout: 600
+  - name: test
+    run: cargo test
+    timeout: 600

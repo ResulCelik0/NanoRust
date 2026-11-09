@@ -37,3 +37,12 @@ Cargo workspace-free single crate (lib + thin bin) so the core is unit-testable 
 - **Hand-written arg parsing**: tiny option set, avoids a dependency.
 - **Atomic save** to avoid data loss on crash.
 - Restore the terminal on panic (hook) so the shell is never left in raw mode.
+
+## Rich text documents (request #1)
+`.docx` files open as rich documents: text and bold/italic/underline plus inline images
+(shown as `[image: name]` placeholders). New modules: `rich` (per-char style layer kept aligned by
+applying the same `Edit`s as the buffer; image table; images are one private-use char in the text)
+and `docx` (read/write OOXML via `zip` + `quick-xml`; unknown package parts pass through verbatim).
+Plain-text editing is unchanged. Keys: Alt+1/2/3 style, Ctrl+R insert image. Details:
+docs/requests/1-zengin-metin-belgelerinide-a-mak-istiyor.md. Rich-text editing is no longer a
+non-goal; RTF/ODT, tables, and image display remain out of scope.

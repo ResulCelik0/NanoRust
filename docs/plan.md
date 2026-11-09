@@ -31,3 +31,14 @@ Goal: feature parity for everyday nano use.
 - [x] README with usage and key table
 Acceptance: tests for prompt state machine and each option; scripted end-to-end scenario covering
 search+replace+save; `cargo clippy -- -D warnings` and `cargo fmt --check` pass.
+
+## Stage 4: DOCX model, reader and writer (request #1)
+Goal: tested `rich` style/image layer and `docx` read/write, no UI.
+- [ ] Add `zip`, `quick-xml`; `rich` layer; `docx::read`/`write`; `.docx` load/save in `fileio`
+Acceptance: unit tests for style alignment under edits/undo, docx round trip, image and passthrough, corrupt input.
+
+## Stage 5: Editor and UI integration, images (request #1)
+Goal: `nanorust file.docx` opens, edits (bold/italic/underline), inserts images and saves.
+- [ ] Editor routing, Alt+1/2/3 and Ctrl+R keys, styled rendering and image placeholder, README, CI
+Acceptance: action-sequence, render and pty e2e tests (edit + insert PNG + save + re-read).
+See docs/requests/1-zengin-metin-belgelerinide-a-mak-istiyor.md.
