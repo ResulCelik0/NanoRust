@@ -6,7 +6,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::buffer::{Buffer, Edit};
+use crate::buffer::{Buffer, Edit, Pos};
 use crate::fileio::{self, LineEnding};
 use crate::keys::Action;
 use crate::undo::History;
@@ -49,6 +49,11 @@ pub struct Editor {
     pub left_col: usize,
     /// Text area size `(columns, rows)`.
     viewport: (usize, usize),
+    tab_size: usize,
+    tabs_to_spaces: bool,
+    line_numbers: bool,
+    help_visible: bool,
+    match_range: Option<(Pos, Pos)>,
 }
 
 impl Default for Editor {
@@ -73,7 +78,84 @@ impl Editor {
             top_line: 0,
             left_col: 0,
             viewport: (80, 24 - CHROME_ROWS),
+            tab_size: 8,
+            tabs_to_spaces: false,
+            line_numbers: false,
+            help_visible: false,
+            match_range: None,
         }
+    }
+
+    // ---- display options ----
+
+    /// Applies command-line display options.
+    pub fn configure(&mut self, tab_size: Option<usize>, tabs_to_spaces: bool, numbers: bool) {
+        self.tab_size = tab_size.unwrap_or(8).max(1);
+        self.tabs_to_spaces = tabs_to_spaces;
+        self.line_numbers = numbers;
+    }
+
+    /// Tab stop width in columns.
+    pub fn tab_size(&self) -> usize {
+        self.tab_size
+    }
+
+    /// Whether Tab inserts spaces.
+    pub fn tabs_to_spaces(&self) -> bool {
+        self.tabs_to_spaces
+    }
+
+    /// Whether the line-number gutter is shown.
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
+    }
+
+    /// Whether the full-screen help is showing (any key dismisses it).
+    pub fn help_visible(&self) -> bool {
+        self.help_visible
+    }
+
+    /// Shows or hides the help screen.
+    pub fn set_help_visible(&mut self, v: bool) {
+        self.help_visible = v;
+    }
+
+    /// Selection as ordered `(start, end)` char positions, if any.
+    pub fn selection_range(&self) -> Option<(Pos, Pos)> {
+        self.buffer.selection_range()
+    }
+
+    /// Current search match to highlight, as ordered `(start, end)` char positions.
+    pub fn match_range(&self) -> Option<(Pos, Pos)> {
+        self.match_range
+    }
+
+    /// Sets (or clears) the highlighted search match.
+    pub fn set_match_range(&mut self, r: Option<(Pos, Pos)>) {
+        self.match_range = r;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mark_for_test(&mut self) {
+        self.buffer.set_mark();
+    }
+
+    fn insert_tab(&mut self) -> Option<Edit> {
+        if !self.tabs_to_spaces {
+            return self.buffer.insert_char('\t');
+        }
+        let (l, c) = self.buffer.cursor();
+        let line = self.buffer.line(l).unwrap_or("");
+        let mut col = 0;
+        for ch in line.chars().take(c) {
+            col += if ch == '\t' {
+                self.tab_size - col % self.tab_size
+            } else {
+                unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
+            };
+        }
+        let n = self.tab_size - col % self.tab_size;
+        self.buffer.insert_str(&" ".repeat(n))
     }
 
     /// Opens `path` (a missing file gives an empty new buffer named `path`),
@@ -198,6 +280,10 @@ impl Editor {
             return;
         }
         self.status = None;
+        if self.help_visible {
+            self.help_visible = false;
+            return;
+        }
         if self.prompt.is_some() {
             self.handle_prompt(action);
         } else {
@@ -214,7 +300,7 @@ impl Editor {
                 self.record(e);
             }
             Action::Tab => {
-                let e = self.buffer.insert_char('\t');
+                let e = self.insert_tab();
                 self.record(e);
             }
             Action::Newline => {

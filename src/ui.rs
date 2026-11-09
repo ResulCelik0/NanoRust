@@ -14,6 +14,22 @@ use crate::editor::{Editor, CHROME_ROWS};
 /// Display width of a tab stop.
 pub const TAB_WIDTH: usize = 8;
 
+/// Kind of highlighted text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Highlight {
+    Selection,
+    Match,
+}
+
+/// Width of the line-number gutter (digits plus a separating space), 0 when off.
+fn gutter_width(ed: &Editor) -> usize {
+    if ed.line_numbers() {
+        ed.buffer().line_count().max(1).to_string().len() + 1
+    } else {
+        0
+    }
+}
+
 /// A rendered frame: one string per terminal row, each exactly `width` columns wide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
@@ -22,6 +38,8 @@ pub struct Screen {
     pub inverse: Vec<bool>,
     /// Cursor `(column, row)`.
     pub cursor: (usize, usize),
+    /// Per row: highlighted display-column ranges `(start, end, kind)`, end exclusive.
+    pub highlights: Vec<Vec<(usize, usize, Highlight)>>,
     pub width: usize,
     pub height: usize,
 }
@@ -31,9 +49,9 @@ fn cell_width(c: char) -> usize {
 }
 
 /// Display width of `c` when it starts at display column `col`.
-fn char_cols(c: char, col: usize) -> usize {
+fn char_cols(c: char, col: usize, tab: usize) -> usize {
     if c == '\t' {
-        TAB_WIDTH - col % TAB_WIDTH
+        tab - col % tab
     } else {
         cell_width(c)
     }
@@ -65,16 +83,16 @@ fn center(s: &str, width: usize) -> String {
 }
 
 /// Display column of character index `idx` in `line`.
-fn display_col(line: &str, idx: usize) -> usize {
+fn display_col(line: &str, idx: usize, tab: usize) -> usize {
     let mut col = 0;
     for c in line.chars().take(idx) {
-        col += char_cols(c, col);
+        col += char_cols(c, col, tab);
     }
     col
 }
 
 /// The visible slice `[left, left+cols)` of `line`, tabs expanded, padded to `cols`.
-fn visible_slice(line: &str, left: usize, cols: usize) -> String {
+fn visible_slice(line: &str, left: usize, cols: usize, tab: usize) -> String {
     let right = left + cols;
     let mut out = String::new();
     let mut used = 0;
@@ -83,7 +101,7 @@ fn visible_slice(line: &str, left: usize, cols: usize) -> String {
         if col >= right {
             break;
         }
-        let w = char_cols(c, col);
+        let w = char_cols(c, col, tab);
         if w == 0 {
             if used > 0 {
                 out.push(c);
@@ -115,10 +133,10 @@ fn visible_slice(line: &str, left: usize, cols: usize) -> String {
 /// cursor is visible. `left_col` is interpreted as a display column here.
 pub fn prepare(ed: &mut Editor, width: usize, height: usize) {
     let rows = height.saturating_sub(CHROME_ROWS).max(1);
-    let cols = width.max(1);
+    let cols = width.saturating_sub(gutter_width(ed)).max(1);
     ed.set_viewport(cols, rows);
     let (l, c) = ed.buffer().cursor();
-    let dc = display_col(ed.buffer().line(l).unwrap_or(""), c);
+    let dc = display_col(ed.buffer().line(l).unwrap_or(""), c, ed.tab_size());
     if l < ed.top_line {
         ed.top_line = l;
     } else if l >= ed.top_line + rows {
@@ -186,6 +204,11 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
     let mut rows: Vec<String> = Vec::with_capacity(height);
     let mut inverse = Vec::with_capacity(height);
     let mut cursor = (0, 0);
+    let mut highlights: Vec<Vec<(usize, usize, Highlight)>> = Vec::with_capacity(height);
+
+    if ed.help_visible() {
+        return help_screen(width, height);
+    }
 
     // Chrome pieces.
     let title = fit(&center(&title_text(ed), width), width);
@@ -194,30 +217,68 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
     if height >= CHROME_ROWS {
         rows.push(title);
         inverse.push(true);
+        highlights.push(Vec::new());
         let (l, c) = ed.buffer().cursor();
+        let tab = ed.tab_size();
+        let gutter = gutter_width(ed).min(width);
+        let tw = width - gutter;
+        let sel = ed.selection_range();
+        let mat = ed.match_range();
         for r in 0..text_rows {
-            let line = ed.buffer().line(ed.top_line + r).unwrap_or("");
-            let empty = ed.top_line + r >= ed.buffer().line_count();
-            rows.push(if empty {
-                " ".repeat(width)
+            let li = ed.top_line + r;
+            let line = ed.buffer().line(li).unwrap_or("");
+            let empty = li >= ed.buffer().line_count();
+            let mut row = String::new();
+            if gutter > 0 {
+                let num = if empty {
+                    String::new()
+                } else {
+                    format!("{:>w$} ", li + 1, w = gutter - 1)
+                };
+                row.push_str(&fit(&num, gutter));
+            }
+            let mut hl = Vec::new();
+            if empty {
+                row.push_str(&" ".repeat(tw));
             } else {
-                visible_slice(line, ed.left_col, width)
-            });
+                row.push_str(&visible_slice(line, ed.left_col, tw, tab));
+                for (range, kind) in [(sel, Highlight::Selection), (mat, Highlight::Match)] {
+                    if let Some(((al, ac), (bl, bc))) = range {
+                        if li < al || li > bl {
+                            continue;
+                        }
+                        let n = line.chars().count();
+                        let s = if li == al { ac } else { 0 };
+                        let e = if li == bl { bc } else { n };
+                        let ds = display_col(line, s.min(n), tab);
+                        let de = display_col(line, e.min(n), tab);
+                        let a = ds.saturating_sub(ed.left_col).min(tw);
+                        let b = de.saturating_sub(ed.left_col).min(tw);
+                        if a < b {
+                            hl.push((a + gutter, b + gutter, kind));
+                        }
+                    }
+                }
+            }
+            rows.push(row);
             inverse.push(false);
+            highlights.push(hl);
         }
-        let dc = display_col(ed.buffer().line(l).unwrap_or(""), c);
+        let dc = display_col(ed.buffer().line(l).unwrap_or(""), c, tab);
         let cur_row = 1 + l.saturating_sub(ed.top_line).min(text_rows.saturating_sub(1));
-        let cur_col = dc.saturating_sub(ed.left_col).min(width.saturating_sub(1));
+        let cur_col = (gutter + dc.saturating_sub(ed.left_col)).min(width.saturating_sub(1));
         cursor = (cur_col, cur_row);
         let status_row = rows.len();
         rows.push(status);
         inverse.push(false);
+        highlights.push(Vec::new());
         if let Some(cc) = status_cursor {
             cursor = (cc, status_row);
         }
         for i in 0..2 {
             rows.push(shortcut_row(i, width, ed.prompt_kind().is_some()));
             inverse.push(false);
+            highlights.push(Vec::new());
         }
     } else if height > 0 {
         // Too small for the text area: keep the status line, then the title, then the bar.
@@ -235,6 +296,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         for (s, i) in chosen {
             rows.push(s);
             inverse.push(i);
+            highlights.push(Vec::new());
         }
     }
     cursor.0 = cursor.0.min(width.saturating_sub(1));
@@ -242,6 +304,51 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
         rows,
         inverse,
         cursor,
+        highlights,
+        width,
+        height,
+    }
+}
+
+const HELP_KEYS: [(&str, &str); 22] = [
+    ("^G", "Display this help"),
+    ("^X", "Exit the editor"),
+    ("^O", "Write the buffer to a file"),
+    ("^R", "Insert a file into the buffer"),
+    ("^W", "Search for text"),
+    ("^\\", "Search and replace"),
+    ("^_", "Go to a line number"),
+    ("^K", "Cut the line or selection"),
+    ("^U", "Paste the cut text"),
+    ("^6", "Set or clear the selection mark"),
+    ("^C", "Show cursor location / cancel"),
+    ("^A / Home", "Start of line"),
+    ("^E / End", "End of line"),
+    ("^Y / PgUp", "Previous page"),
+    ("^V / PgDn", "Next page"),
+    ("Arrows", "Move the cursor"),
+    ("Tab", "Insert a tab (or spaces with -E)"),
+    ("Backspace", "Delete before the cursor"),
+    ("Delete", "Delete at the cursor"),
+    ("M-U", "Undo"),
+    ("M-E", "Redo"),
+    ("Any key", "Close this help"),
+];
+
+/// The full-screen help: title, key table, clipped to the screen size.
+fn help_screen(width: usize, height: usize) -> Screen {
+    let mut lines = vec![center("NanoRust Help", width), " ".repeat(width)];
+    for (k, d) in HELP_KEYS {
+        lines.push(fit(&format!(" {k:<12} {d}"), width));
+    }
+    lines.resize(height, " ".repeat(width));
+    lines.truncate(height);
+    let inverse = (0..height).map(|i| i == 0).collect();
+    Screen {
+        rows: lines,
+        inverse,
+        cursor: (0, 0),
+        highlights: vec![Vec::new(); height],
         width,
         height,
     }
@@ -298,7 +405,12 @@ pub fn draw<W: Write>(out: &mut W, screen: &Screen, prev: Option<&Screen>) -> io
         if inv {
             queue!(out, SetAttribute(Attribute::Reverse))?;
         }
-        queue!(out, Print(row))?;
+        let hl = screen.highlights.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        if hl.is_empty() {
+            queue!(out, Print(row))?;
+        } else {
+            draw_highlighted(out, row, hl)?;
+        }
         if inv {
             queue!(out, SetAttribute(Attribute::Reset))?;
         }
@@ -309,6 +421,41 @@ pub fn draw<W: Write>(out: &mut W, screen: &Screen, prev: Option<&Screen>) -> io
         Show
     )?;
     out.flush()
+}
+
+/// Prints `row`, drawing the highlighted display-column ranges in reverse video
+/// (selection) or bold reverse (match).
+fn draw_highlighted<W: Write>(
+    out: &mut W,
+    row: &str,
+    hl: &[(usize, usize, Highlight)],
+) -> io::Result<()> {
+    let mut col = 0;
+    let mut cur: Option<Highlight> = None;
+    for c in row.chars() {
+        let want = hl
+            .iter()
+            .rev()
+            .find(|(a, b, _)| col >= *a && col < *b)
+            .map(|h| h.2);
+        if want != cur {
+            queue!(out, SetAttribute(Attribute::Reset))?;
+            match want {
+                Some(Highlight::Selection) => queue!(out, SetAttribute(Attribute::Reverse))?,
+                Some(Highlight::Match) => {
+                    queue!(out, SetAttribute(Attribute::Reverse), SetAttribute(Attribute::Bold))?
+                }
+                None => {}
+            }
+            cur = want;
+        }
+        queue!(out, Print(c))?;
+        col += cell_width(c);
+    }
+    if cur.is_some() {
+        queue!(out, SetAttribute(Attribute::Reset))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -414,8 +561,8 @@ mod tests {
 
     #[test]
     fn slice_cuts_wide_char_at_left_edge() {
-        assert_eq!(visible_slice("日本", 1, 4), " 本 ");
-        assert_eq!(visible_slice("a日", 0, 2), "a ");
+        assert_eq!(visible_slice("日本", 1, 4, 8), " 本 ");
+        assert_eq!(visible_slice("a日", 0, 2, 8), "a ");
     }
 
     #[test]
@@ -500,5 +647,111 @@ mod tests {
         let mut same = Vec::new();
         draw(&mut same, &s2, Some(&s2)).unwrap();
         assert!(same.len() < diff.len());
+    }
+
+    #[test]
+    fn gutter_and_cursor() {
+        let text: String = (1..=12).map(|i| format!("l{i}\n")).collect();
+        let mut ed = ed_with(&text);
+        ed.configure(None, false, true);
+        ed.handle(Action::Up);
+        ed.handle(Action::Up);
+        let s = scr(&mut ed, 20, 8);
+        // 13 lines -> 2 digits + space
+        let n = ed.top_line + 1;
+        assert!(s.rows[1].starts_with(&format!("{n:>2} l{n}")), "{:?}", s.rows[1]);
+        assert!(s.rows.iter().all(|r| r.chars().count() == 20));
+        let cur_line = ed.buffer().cursor().0;
+        assert_eq!(s.cursor, (3, 1 + cur_line - ed.top_line));
+        ed.handle(Action::End);
+        let s = scr(&mut ed, 20, 8);
+        assert_eq!(s.cursor.0, 3 + ed.buffer().line(cur_line).unwrap().chars().count());
+    }
+
+    #[test]
+    fn gutter_off_by_default() {
+        let mut ed = ed_with("x");
+        let s = scr(&mut ed, 20, 8);
+        assert!(s.rows[1].starts_with('x'));
+    }
+
+    #[test]
+    fn gutter_horizontal_scroll() {
+        let mut ed = ed_with(&"a".repeat(30));
+        ed.configure(None, false, true);
+        let s = scr(&mut ed, 12, 8);
+        assert_eq!(s.cursor.0, 11);
+        assert!(s.rows[1].starts_with("1 "));
+    }
+
+    #[test]
+    fn custom_tab_size() {
+        let mut ed = ed_with("a\tb");
+        ed.configure(Some(4), false, false);
+        let s = scr(&mut ed, 30, 8);
+        assert_eq!(&s.rows[1][..6], "a   b ");
+        assert_eq!(s.cursor, (5, 1));
+    }
+
+    #[test]
+    fn tabs_to_spaces_inserts_to_next_stop() {
+        let mut ed = Editor::new();
+        ed.configure(Some(4), true, false);
+        ed.handle(Action::Insert('a'));
+        ed.handle(Action::Tab);
+        assert_eq!(ed.buffer().line(0), Some("a   "));
+        ed.handle(Action::Tab);
+        assert_eq!(ed.buffer().line(0), Some("a       "));
+        let mut ed = Editor::new();
+        ed.configure(Some(4), false, false);
+        ed.handle(Action::Tab);
+        assert_eq!(ed.buffer().line(0), Some("\t"));
+    }
+
+    #[test]
+    fn selection_highlight() {
+        let mut ed = ed_with("hello world");
+        ed.handle(Action::Home);
+        ed.set_mark_for_test();
+        for _ in 0..5 {
+            ed.handle(Action::Right);
+        }
+        let s = scr(&mut ed, 30, 8);
+        assert_eq!(s.highlights[1], vec![(0, 5, Highlight::Selection)]);
+        assert!(s.highlights[2].is_empty());
+    }
+
+    #[test]
+    fn match_highlight_with_gutter() {
+        let mut ed = ed_with("hello world");
+        ed.configure(None, false, true);
+        ed.set_match_range(Some(((0, 6), (0, 11))));
+        let s = scr(&mut ed, 30, 8);
+        assert_eq!(s.highlights[1], vec![(8, 13, Highlight::Match)]);
+        let mut out = Vec::new();
+        draw(&mut out, &s, None).unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("world"));
+    }
+
+    #[test]
+    fn help_screen_shown() {
+        let mut ed = ed_with("secret text");
+        ed.set_help_visible(true);
+        let s = scr(&mut ed, 60, 30);
+        assert_eq!(s.rows.len(), 30);
+        assert!(s.rows[0].contains("Help"));
+        assert!(s.rows.iter().any(|r| r.contains("^X") && r.contains("Exit")));
+        assert!(!s.rows.iter().any(|r| r.contains("secret")));
+        ed.handle(Action::Insert('q'));
+        assert!(!ed.help_visible());
+        assert_eq!(ed.buffer().line(0), Some("secret text"));
+        let s = scr(&mut ed, 60, 30);
+        assert!(s.rows[1].contains("secret"));
+        ed.set_help_visible(true);
+        for w in 0..6 {
+            for h in 0..6 {
+                scr(&mut ed, w, h);
+            }
+        }
     }
 }
