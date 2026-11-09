@@ -13,11 +13,11 @@ round trips, and save→load identity on temp files.
 
 ## Stage 2: Terminal UI and a usable editor
 Goal: `nanorust FILE` is an interactive editor with the basic nano workflow.
-- [ ] Terminal setup/teardown with panic-safe restore; resize handling
-- [ ] `keys` → `Action` mapping with nano bindings; arrow/Home/End/PgUp/PgDn/Del
-- [ ] Rendering: title bar, text with horizontal/vertical scrolling, tabs, wide chars, status line, shortcut bar
-- [ ] Prompts: write-out filename, exit with unsaved-changes confirm, modified flag
-- [ ] Args: `+LINE`, `--version`, `--help`
+- [x] Terminal setup/teardown with panic-safe restore; resize handling
+- [x] `keys` → `Action` mapping with nano bindings; arrow/Home/End/PgUp/PgDn/Del
+- [x] Rendering: title bar, text with horizontal/vertical scrolling, tabs, wide chars, status line, shortcut bar
+- [x] Prompts: write-out filename, exit with unsaved-changes confirm, modified flag
+- [x] Args: `+LINE`, `--version`, `--help`
 Acceptance: render tests against a virtual screen (scrolling, tabs, wide chars); action-sequence tests
 for edit→save→exit flow; an end-to-end test running the binary in a pty-less mode or via scripted
 events that edits and saves a file.
