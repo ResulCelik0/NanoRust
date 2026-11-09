@@ -185,3 +185,53 @@ fn line_numbers_option_edits_normally() {
     assert!(ok);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "one\nXtwo\n");
 }
+
+#[test]
+fn docx_type_bold_insert_image_save_reread() {
+    use nanorust::docx;
+    use nanorust::rich::Style;
+    if !have_script() {
+        return;
+    }
+    let d = tmpdir("docx");
+    let f = d.join("a.docx");
+    let png = d.join("pic.png");
+    let png_bytes: &[u8] = b"\x89PNG\r\n\x1a\n-e2e-fake-";
+    std::fs::write(&png, png_bytes).unwrap();
+    std::fs::write(&f, docx::write(&docx::Document::new()).unwrap()).unwrap();
+
+    let png_keys = format!("{}\r", png.to_str().unwrap());
+    let ok = drive(
+        &[f.to_str().unwrap()],
+        &[
+            b"plain ",
+            b"\x1b1", // Alt+1 bold on
+            b"bold",
+            b"\x1b1", // Alt+1 bold off
+            b" end",
+            b"\x12", // Ctrl+R insert image
+            png_keys.as_bytes(),
+            b"\x0f", // Ctrl+O
+            b"\r",
+            b"\x18", // Ctrl+X
+        ],
+    );
+    assert!(ok);
+
+    let doc = docx::read(&std::fs::read(&f).unwrap()).unwrap();
+    let line = &doc.lines[0];
+    assert!(line.starts_with("plain bold end"), "{line:?}");
+    for (i, c) in line.chars().enumerate() {
+        let st = doc.rich.style_at((0, i)).unwrap();
+        if (6..10).contains(&i) {
+            assert!(st.contains(Style::BOLD), "char {i} {c:?} should be bold");
+        } else if i < 14 {
+            assert!(!st.contains(Style::BOLD), "char {i} {c:?} should not be bold");
+        }
+    }
+    let img = line.chars().last().unwrap();
+    let image = doc.rich.images.get(img).expect("image placeholder");
+    assert_eq!(image.bytes, png_bytes);
+    assert_eq!(image.name, "pic.png");
+    let _ = std::fs::remove_dir_all(&d);
+}
