@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::buffer::{Buffer, Edit, Pos};
 use crate::fileio::{self, LineEnding};
 use crate::keys::Action;
+use crate::search::{self, Match, Options};
 use crate::undo::History;
 
 /// Rows of terminal chrome around the text area (title bar, status line, two help lines).
@@ -21,6 +22,16 @@ pub enum PromptKind {
     WriteOut,
     /// "Save modified buffer? (Y/N/Ctrl+C)" asked on exit with unsaved changes.
     SaveModified,
+    /// "Search:" query input.
+    Search,
+    /// "Replace:" query input (step one of replace).
+    Replace,
+    /// "Replace with:" replacement input (step two of replace).
+    ReplaceWith,
+    /// Per-match "Replace this instance?" confirmation (Y/N/A/Esc).
+    ReplaceConfirm,
+    /// "Enter line number, column number:" input.
+    Goto,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +54,16 @@ pub struct Editor {
     status: Option<String>,
     quit: bool,
     prompt: Option<Prompt>,
+    /// Last search/replace query (reused when the prompt is confirmed empty).
+    last_query: String,
+    /// Replacement text of a replace in progress.
+    replacement: String,
+    /// Replacements made by the replace in progress.
+    replaced: usize,
+    case_sensitive: bool,
+    backward: bool,
+    current_match: Option<Match>,
+    help: bool,
     /// First visible buffer line.
     pub top_line: usize,
     /// First visible character column.
@@ -52,8 +73,6 @@ pub struct Editor {
     tab_size: usize,
     tabs_to_spaces: bool,
     line_numbers: bool,
-    help_visible: bool,
-    match_range: Option<(Pos, Pos)>,
 }
 
 impl Default for Editor {
@@ -75,14 +94,19 @@ impl Editor {
             status: None,
             quit: false,
             prompt: None,
+            last_query: String::new(),
+            replacement: String::new(),
+            replaced: 0,
+            case_sensitive: false,
+            backward: false,
+            current_match: None,
+            help: false,
             top_line: 0,
             left_col: 0,
             viewport: (80, 24 - CHROME_ROWS),
             tab_size: 8,
             tabs_to_spaces: false,
             line_numbers: false,
-            help_visible: false,
-            match_range: None,
         }
     }
 
@@ -112,12 +136,12 @@ impl Editor {
 
     /// Whether the full-screen help is showing (any key dismisses it).
     pub fn help_visible(&self) -> bool {
-        self.help_visible
+        self.help
     }
 
     /// Shows or hides the help screen.
     pub fn set_help_visible(&mut self, v: bool) {
-        self.help_visible = v;
+        self.help = v;
     }
 
     /// Selection as ordered `(start, end)` char positions, if any.
@@ -127,12 +151,15 @@ impl Editor {
 
     /// Current search match to highlight, as ordered `(start, end)` char positions.
     pub fn match_range(&self) -> Option<(Pos, Pos)> {
-        self.match_range
+        self.current_match()
     }
 
     /// Sets (or clears) the highlighted search match.
     pub fn set_match_range(&mut self, r: Option<(Pos, Pos)>) {
-        self.match_range = r;
+        self.current_match = r.map(|(a, b)| Match {
+            start: a,
+            len: b.1.saturating_sub(a.1),
+        });
     }
 
     #[cfg(test)]
@@ -196,11 +223,43 @@ impl Editor {
         self.prompt.as_ref().map(|p| p.text.as_str())
     }
     /// Prompt label to display, if a prompt is open.
-    pub fn prompt_label(&self) -> Option<&'static str> {
-        self.prompt.as_ref().map(|p| match p.kind {
-            PromptKind::WriteOut => "File Name to Write",
-            PromptKind::SaveModified => "Save modified buffer? (Y/N/Ctrl+C)",
+    pub fn prompt_label(&self) -> Option<String> {
+        let kind = self.prompt_kind()?;
+        let toggles = |base: &str| {
+            let mut l = base.to_string();
+            if self.case_sensitive {
+                l.push_str(" [Case Sensitive]");
+            }
+            if self.backward {
+                l.push_str(" [Backwards]");
+            }
+            l
+        };
+        Some(match kind {
+            PromptKind::WriteOut => "File Name to Write".to_string(),
+            PromptKind::SaveModified => "Save modified buffer? (Y/N/Ctrl+C)".to_string(),
+            PromptKind::Search => toggles("Search"),
+            PromptKind::Replace => toggles("Replace"),
+            PromptKind::ReplaceWith => "Replace with".to_string(),
+            PromptKind::ReplaceConfirm => "Replace this instance? (Y/N/A/Esc)".to_string(),
+            PromptKind::Goto => "Enter line number, column number".to_string(),
         })
+    }
+    /// The current search match as an ordered `(start, end)` range, for highlighting.
+    pub fn current_match(&self) -> Option<(Pos, Pos)> {
+        self.current_match.map(|m| (m.start, m.end()))
+    }
+    /// Where the mark was set, if it is.
+    pub fn mark_anchor(&self) -> Option<Pos> {
+        self.buffer.mark()
+    }
+    /// Whether searches are case sensitive.
+    pub fn case_sensitive(&self) -> bool {
+        self.case_sensitive
+    }
+    /// Whether searches go backwards.
+    pub fn backward(&self) -> bool {
+        self.backward
     }
     /// Current status message, if any.
     pub fn status(&self) -> Option<&str> {
@@ -280,8 +339,9 @@ impl Editor {
             return;
         }
         self.status = None;
-        if self.help_visible {
-            self.help_visible = false;
+        if self.help {
+            // Ctrl+G toggles; any other key also dismisses the help screen.
+            self.help = false;
             return;
         }
         if self.prompt.is_some() {
@@ -294,6 +354,9 @@ impl Editor {
 
     fn handle_edit(&mut self, action: Action) {
         let rows = self.viewport.1;
+        if action != Action::RepeatSearch {
+            self.current_match = None;
+        }
         match action {
             Action::Insert(c) => {
                 let e = self.buffer.insert_char(c);
@@ -357,7 +420,178 @@ impl Editor {
                     self.quit = true;
                 }
             }
-            Action::Cancel | Action::Resize(..) => {}
+            Action::Search => self.open_prompt(PromptKind::Search),
+            Action::Replace => self.open_prompt(PromptKind::Replace),
+            Action::RepeatSearch => self.repeat_search(),
+            Action::Goto => self.open_prompt(PromptKind::Goto),
+            Action::Cancel => self.show_position(),
+            Action::Mark => {
+                if self.buffer.mark().is_some() {
+                    self.buffer.clear_mark();
+                    self.set_status("Mark Unset");
+                } else {
+                    self.buffer.set_mark();
+                    self.set_status("Mark Set");
+                }
+            }
+            Action::Help => self.help = true,
+            Action::Escape
+            | Action::ToggleCase
+            | Action::ToggleBackwards
+            | Action::Resize(..) => {}
+        }
+    }
+
+    fn open_prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(Prompt {
+            kind,
+            text: String::new(),
+            quit_after: false,
+        });
+    }
+
+    fn search_opts(&self) -> Options {
+        Options {
+            case_sensitive: self.case_sensitive,
+            backward: self.backward,
+            wrap: true,
+        }
+    }
+
+    fn not_found(&mut self) {
+        self.current_match = None;
+        let q = self.last_query.clone();
+        self.set_status(format!("\"{q}\" not found"));
+    }
+
+    /// Searches from the cursor for the last query and moves to the match.
+    fn run_search(&mut self) {
+        if self.last_query.is_empty() {
+            self.set_status("No current search pattern");
+            return;
+        }
+        let from = self.buffer.cursor();
+        match search::find(&self.buffer, from, &self.last_query, self.search_opts()) {
+            Some(m) => {
+                let wrapped = if self.backward {
+                    m.start >= from
+                } else {
+                    m.start <= from
+                };
+                self.buffer.set_cursor(m.start);
+                self.current_match = Some(m);
+                if wrapped {
+                    self.set_status("Search Wrapped");
+                }
+            }
+            None => self.not_found(),
+        }
+    }
+
+    fn repeat_search(&mut self) {
+        self.run_search();
+    }
+
+    /// Shows "line L/N (P%), col C/M (P%), char X/Y (P%)" in the status bar.
+    fn show_position(&mut self) {
+        let (l, c) = self.buffer.cursor();
+        let lines = self.buffer.line_count();
+        let line_chars = |i: usize| self.buffer.line(i).map_or(0, |s| s.chars().count());
+        let total: usize = (0..lines).map(line_chars).sum::<usize>() + lines - 1;
+        let before: usize = (0..l).map(|i| line_chars(i) + 1).sum::<usize>() + c;
+        let cols = line_chars(l) + 1;
+        let pct = |a: usize, b: usize| a * 100 / b.max(1);
+        self.set_status(format!(
+            "line {}/{} ({}%), col {}/{} ({}%), char {}/{} ({}%)",
+            l + 1,
+            lines,
+            pct(l + 1, lines),
+            c + 1,
+            cols,
+            pct(c + 1, cols),
+            before + 1,
+            total + 1,
+            pct(before + 1, total + 1),
+        ));
+    }
+
+    fn goto_from_text(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            self.set_status("Cancelled");
+            return;
+        }
+        let (line_s, col_s) = match text.split_once(',') {
+            Some((a, b)) => (a.trim(), Some(b.trim())),
+            None => (text, None),
+        };
+        let line = if line_s.is_empty() && col_s.is_some() {
+            Some(self.buffer.cursor().0 + 1)
+        } else {
+            line_s.parse::<usize>().ok()
+        };
+        let col = match col_s {
+            None | Some("") => Some(None),
+            Some(c) => c.parse::<usize>().ok().map(Some),
+        };
+        match (line, col) {
+            (Some(l), Some(c)) => {
+                self.buffer.goto(l, c);
+            }
+            _ => self.set_status("Invalid line or column number"),
+        }
+    }
+
+    fn start_replace(&mut self) {
+        let from = self.buffer.cursor();
+        self.replaced = 0;
+        self.find_replace_match(from);
+        if self.current_match.is_none() {
+            self.prompt = None;
+            self.not_found();
+        } else {
+            self.open_prompt(PromptKind::ReplaceConfirm);
+        }
+    }
+
+    /// Looks for the next match at or after `from` (no wrap) for a replace.
+    fn find_replace_match(&mut self, from: Pos) {
+        let opts = Options {
+            backward: false,
+            wrap: false,
+            ..self.search_opts()
+        };
+        self.current_match = search::find_from(&self.buffer, from, &self.last_query, opts);
+        if let Some(m) = self.current_match {
+            self.buffer.set_cursor(m.start);
+        }
+    }
+
+    fn finish_replace(&mut self) {
+        self.prompt = None;
+        self.current_match = None;
+        let n = self.replaced;
+        let s = if n == 1 { "" } else { "s" };
+        self.set_status(format!("Replaced {n} occurrence{s}"));
+    }
+
+    fn replace_confirm(&mut self, all: bool) {
+        let mut group = Vec::new();
+        while let Some(m) = self.current_match {
+            group.extend(search::replace_match(&mut self.buffer, &m, &self.replacement));
+            self.replaced += 1;
+            let from = self.buffer.cursor();
+            self.find_replace_match(from);
+            if !all {
+                break;
+            }
+        }
+        if !group.is_empty() {
+            self.history.record_group(group);
+            self.modified = true;
+        }
+        if self.current_match.is_none() {
+            self.finish_replace();
         }
     }
 
@@ -378,12 +612,34 @@ impl Editor {
         let Some(prompt) = self.prompt.as_mut() else {
             return;
         };
-        if action == Action::Cancel {
-            self.prompt = None;
-            self.set_status("Cancelled");
+        if matches!(action, Action::Cancel | Action::Escape) {
+            if prompt.kind == PromptKind::ReplaceConfirm {
+                self.finish_replace();
+            } else {
+                self.prompt = None;
+                self.current_match = None;
+                self.set_status("Cancelled");
+            }
             return;
         }
         match prompt.kind {
+            PromptKind::ReplaceConfirm => match action {
+                Action::Insert('y' | 'Y') => self.replace_confirm(false),
+                Action::Insert('a' | 'A') => self.replace_confirm(true),
+                Action::Insert('n' | 'N') => {
+                    if let Some(m) = self.current_match {
+                        self.find_replace_match((m.start.0, m.start.1 + 1));
+                    }
+                    if self.current_match.is_none() {
+                        self.finish_replace();
+                    }
+                }
+                _ => {}
+            },
+            PromptKind::Search
+            | PromptKind::Replace
+            | PromptKind::ReplaceWith
+            | PromptKind::Goto => self.handle_text_prompt(action),
             PromptKind::SaveModified => match action {
                 Action::Insert('y' | 'Y') => self.open_write_out(true),
                 Action::Insert('n' | 'N') => {
@@ -410,6 +666,51 @@ impl Editor {
                 }
                 _ => {}
             },
+        }
+    }
+
+    fn handle_text_prompt(&mut self, action: Action) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        let kind = prompt.kind;
+        match action {
+            Action::Insert(c) => prompt.text.push(c),
+            Action::Backspace => {
+                prompt.text.pop();
+            }
+            Action::ToggleCase if matches!(kind, PromptKind::Search | PromptKind::Replace) => {
+                self.case_sensitive = !self.case_sensitive;
+            }
+            Action::ToggleBackwards
+                if matches!(kind, PromptKind::Search | PromptKind::Replace) =>
+            {
+                self.backward = !self.backward;
+            }
+            Action::Newline => {
+                let text = std::mem::take(&mut prompt.text);
+                self.prompt = None;
+                match kind {
+                    PromptKind::Search | PromptKind::Replace => {
+                        if !text.is_empty() {
+                            self.last_query = text;
+                        }
+                        if self.last_query.is_empty() {
+                            self.set_status("Cancelled");
+                        } else if kind == PromptKind::Search {
+                            self.run_search();
+                        } else {
+                            self.open_prompt(PromptKind::ReplaceWith);
+                        }
+                    }
+                    PromptKind::ReplaceWith => {
+                        self.replacement = text;
+                        self.start_replace();
+                    }
+                    _ => self.goto_from_text(&text),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -588,5 +889,259 @@ mod tests {
             ed.handle(Action::Insert('x'));
         }
         assert!(ed.left_col > 0);
+    }
+
+    fn ed_with(text: &str) -> Editor {
+        let mut ed = Editor::new();
+        ed.buffer = Buffer::from_text(text);
+        ed
+    }
+
+    fn search_for(ed: &mut Editor, q: &str) {
+        ed.handle(Action::Search);
+        type_str(ed, q);
+        ed.handle(Action::Newline);
+    }
+
+    #[test]
+    fn search_finds_and_highlights() {
+        let mut ed = ed_with("one two\nthree two");
+        search_for(&mut ed, "two");
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.buffer().cursor(), (0, 4));
+        assert_eq!(ed.current_match(), Some(((0, 4), (0, 7))));
+        ed.handle(Action::RepeatSearch);
+        assert_eq!(ed.buffer().cursor(), (1, 6));
+        ed.handle(Action::RepeatSearch);
+        assert_eq!(ed.buffer().cursor(), (0, 4));
+        assert_eq!(ed.status(), Some("Search Wrapped"));
+        ed.handle(Action::Right);
+        assert_eq!(ed.current_match(), None);
+    }
+
+    #[test]
+    fn search_empty_input_reuses_last_query() {
+        let mut ed = ed_with("ab ab ab");
+        search_for(&mut ed, "ab");
+        assert_eq!(ed.buffer().cursor(), (0, 3));
+        ed.handle(Action::Search);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (0, 6));
+    }
+
+    #[test]
+    fn search_empty_without_history_cancels() {
+        let mut ed = ed_with("ab");
+        ed.handle(Action::Search);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.status(), Some("Cancelled"));
+        ed.handle(Action::RepeatSearch);
+        assert_eq!(ed.status(), Some("No current search pattern"));
+    }
+
+    #[test]
+    fn search_not_found_and_cancel() {
+        let mut ed = ed_with("abc");
+        search_for(&mut ed, "zzz");
+        assert_eq!(ed.status(), Some("\"zzz\" not found"));
+        assert_eq!(ed.current_match(), None);
+        ed.handle(Action::Search);
+        type_str(&mut ed, "a");
+        assert_eq!(ed.prompt_text(), Some("a"));
+        ed.handle(Action::Backspace);
+        assert_eq!(ed.prompt_text(), Some(""));
+        ed.handle(Action::Cancel);
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.status(), Some("Cancelled"));
+        ed.handle(Action::Search);
+        ed.handle(Action::Escape);
+        assert_eq!(ed.prompt_kind(), None);
+    }
+
+    #[test]
+    fn search_case_toggle_and_label() {
+        let mut ed = ed_with("Foo foo");
+        ed.handle(Action::Search);
+        assert_eq!(ed.prompt_label().as_deref(), Some("Search"));
+        ed.handle(Action::ToggleCase);
+        assert_eq!(ed.prompt_label().as_deref(), Some("Search [Case Sensitive]"));
+        type_str(&mut ed, "foo");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (0, 4));
+        assert!(ed.case_sensitive());
+        ed.handle(Action::Search);
+        ed.handle(Action::ToggleCase);
+        type_str(&mut ed, "FOO");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (0, 0));
+    }
+
+    #[test]
+    fn search_backwards() {
+        let mut ed = ed_with("x a x a x");
+        ed.handle(Action::Search);
+        ed.handle(Action::ToggleBackwards);
+        assert_eq!(ed.prompt_label().as_deref(), Some("Search [Backwards]"));
+        type_str(&mut ed, "x");
+        ed.handle(Action::Newline);
+        // Wraps to the last match from the start.
+        assert_eq!(ed.buffer().cursor(), (0, 8));
+        assert_eq!(ed.status(), Some("Search Wrapped"));
+        ed.handle(Action::RepeatSearch);
+        assert_eq!(ed.buffer().cursor(), (0, 4));
+        assert_eq!(ed.status(), None);
+    }
+
+    #[test]
+    fn replace_confirm_yes_no_all() {
+        let mut ed = ed_with("a a a a");
+        ed.handle(Action::Replace);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::Replace));
+        type_str(&mut ed, "a");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::ReplaceWith));
+        type_str(&mut ed, "bb");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::ReplaceConfirm));
+        assert_eq!(ed.current_match(), Some(((0, 0), (0, 1))));
+        ed.handle(Action::Insert('y'));
+        assert_eq!(ed.buffer().to_text(), "bb a a a");
+        assert_eq!(ed.current_match(), Some(((0, 3), (0, 4))));
+        ed.handle(Action::Insert('n'));
+        assert_eq!(ed.current_match(), Some(((0, 5), (0, 6))));
+        ed.handle(Action::Insert('x'));
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::ReplaceConfirm));
+        ed.handle(Action::Insert('A'));
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.buffer().to_text(), "bb a bb bb");
+        assert_eq!(ed.status(), Some("Replaced 3 occurrences"));
+        assert!(ed.modified());
+        ed.handle(Action::Undo);
+        assert_eq!(ed.buffer().to_text(), "bb a a a");
+        ed.handle(Action::Undo);
+        assert_eq!(ed.buffer().to_text(), "a a a a");
+    }
+
+    #[test]
+    fn replace_cancel_and_empty_replacement() {
+        let mut ed = ed_with("xax");
+        ed.handle(Action::Replace);
+        type_str(&mut ed, "x");
+        ed.handle(Action::Newline);
+        ed.handle(Action::Newline); // empty replacement
+        ed.handle(Action::Insert('y'));
+        assert_eq!(ed.buffer().to_text(), "ax");
+        ed.handle(Action::Escape);
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.status(), Some("Replaced 1 occurrence"));
+        assert_eq!(ed.buffer().to_text(), "ax");
+        // Ctrl+C in the second step cancels without changes.
+        ed.handle(Action::Replace);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::ReplaceWith));
+        ed.handle(Action::Cancel);
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.buffer().to_text(), "ax");
+    }
+
+    #[test]
+    fn replace_not_found_and_all_declined() {
+        let mut ed = ed_with("abc");
+        ed.handle(Action::Replace);
+        type_str(&mut ed, "q");
+        ed.handle(Action::Newline);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.status(), Some("\"q\" not found"));
+        assert!(!ed.modified());
+        ed.handle(Action::Replace);
+        type_str(&mut ed, "b");
+        ed.handle(Action::Newline);
+        type_str(&mut ed, "z");
+        ed.handle(Action::Newline);
+        ed.handle(Action::Insert('n'));
+        assert_eq!(ed.prompt_kind(), None);
+        assert_eq!(ed.status(), Some("Replaced 0 occurrences"));
+        assert!(!ed.modified());
+    }
+
+    #[test]
+    fn goto_line_and_column() {
+        let mut ed = ed_with("abc\ndef\nghi");
+        ed.handle(Action::Goto);
+        assert_eq!(ed.prompt_kind(), Some(PromptKind::Goto));
+        type_str(&mut ed, "2,3");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (1, 2));
+        ed.handle(Action::Goto);
+        type_str(&mut ed, "3");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (2, 0));
+        ed.handle(Action::Goto);
+        type_str(&mut ed, ",2");
+        ed.handle(Action::Newline);
+        assert_eq!(ed.buffer().cursor(), (2, 1));
+        for bad in ["x", "1,y", "-1", "1,2,3"] {
+            ed.handle(Action::Goto);
+            type_str(&mut ed, bad);
+            ed.handle(Action::Newline);
+            assert_eq!(ed.status(), Some("Invalid line or column number"), "{bad}");
+            assert_eq!(ed.buffer().cursor(), (2, 1));
+        }
+        ed.handle(Action::Goto);
+        ed.handle(Action::Cancel);
+        assert_eq!(ed.prompt_kind(), None);
+        ed.handle(Action::Goto);
+        ed.handle(Action::Newline);
+        assert_eq!(ed.status(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn cursor_position_status() {
+        let mut ed = ed_with("abc\ndef");
+        ed.handle(Action::Down);
+        ed.handle(Action::Right);
+        ed.handle(Action::Cancel);
+        assert_eq!(
+            ed.status(),
+            Some("line 2/2 (100%), col 2/4 (50%), char 6/8 (75%)")
+        );
+        assert_eq!(ed.prompt_kind(), None);
+    }
+
+    #[test]
+    fn mark_toggle_and_selection() {
+        let mut ed = ed_with("hello");
+        assert_eq!(ed.mark_anchor(), None);
+        ed.handle(Action::Mark);
+        assert_eq!(ed.mark_anchor(), Some((0, 0)));
+        assert_eq!(ed.status(), Some("Mark Set"));
+        ed.handle(Action::Right);
+        ed.handle(Action::Right);
+        assert_eq!(ed.selection_range(), Some(((0, 0), (0, 2))));
+        ed.handle(Action::Mark);
+        assert_eq!(ed.mark_anchor(), None);
+        assert_eq!(ed.selection_range(), None);
+        ed.handle(Action::Mark);
+        ed.handle(Action::Left);
+        ed.handle(Action::Cut);
+        assert_eq!(ed.buffer().to_text(), "hllo");
+        ed.handle(Action::Paste);
+        assert_eq!(ed.buffer().to_text(), "hello");
+    }
+
+    #[test]
+    fn help_toggle() {
+        let mut ed = ed_with("a");
+        assert!(!ed.help_visible());
+        ed.handle(Action::Help);
+        assert!(ed.help_visible());
+        ed.handle(Action::Help);
+        assert!(!ed.help_visible());
+        ed.handle(Action::Help);
+        ed.handle(Action::Insert('z'));
+        assert!(!ed.help_visible());
+        assert_eq!(ed.buffer().to_text(), "a");
     }
 }

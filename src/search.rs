@@ -117,6 +117,18 @@ pub fn find_next(buf: &mut Buffer, query: &str, opts: Options) -> Option<Match> 
     Some(m)
 }
 
+/// Like [`find`] but a match starting exactly at `from` counts (forward only
+/// differs; backward behaves as [`find`]).
+pub fn find_from(buf: &Buffer, from: Pos, query: &str, opts: Options) -> Option<Match> {
+    find_impl(buf, from, query, opts, true)
+}
+
+/// Replaces the located match `m` with `repl`, moving the cursor after the
+/// replacement, and returns the applied edits (for the caller to record).
+pub fn replace_match(buf: &mut Buffer, m: &Match, repl: &str) -> Vec<Edit> {
+    do_replace(buf, m, repl)
+}
+
 fn replace_edits(m: &Match, repl: &str) -> Vec<Edit> {
     let mut v = vec![Edit::Delete {
         pos: m.start,

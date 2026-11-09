@@ -35,12 +35,30 @@ pub enum Action {
     WriteOut,
     /// Ctrl+X: exit.
     Exit,
-    /// Ctrl+C: cancel the current prompt.
+    /// Ctrl+C: cancel the current prompt, or show the cursor position.
     Cancel,
     /// Alt+U.
     Undo,
     /// Alt+E.
     Redo,
+    /// Esc: cancels prompts (no effect while editing).
+    Escape,
+    /// Ctrl+W.
+    Search,
+    /// Ctrl+Backslash.
+    Replace,
+    /// Alt+W: repeat the last search.
+    RepeatSearch,
+    /// Ctrl+_: go to line[,column].
+    Goto,
+    /// Ctrl+6 / Alt+A: toggle the mark.
+    Mark,
+    /// Ctrl+G: toggle the help screen.
+    Help,
+    /// Alt+C: toggle case sensitivity (search prompts).
+    ToggleCase,
+    /// Alt+B: toggle backwards search (search prompts).
+    ToggleBackwards,
     /// Terminal resized to `(columns, rows)`.
     Resize(u16, u16),
 }
@@ -63,14 +81,26 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
             'y' => Some(Action::PageUp),
             'v' => Some(Action::PageDown),
             'c' => Some(Action::Cancel),
+            'w' => Some(Action::Search),
+            'g' => Some(Action::Help),
+            // Terminals send Ctrl+Backslash, Ctrl+_ and Ctrl+6 as control codes that
+            // crossterm reports as Ctrl+4, Ctrl+7 and Ctrl+6.
+            '\\' | '4' => Some(Action::Replace),
+            '_' | '/' | '7' => Some(Action::Goto),
+            '6' | '^' | '@' | ' ' => Some(Action::Mark),
             _ => None,
         },
         KeyCode::Char(c) if alt => match c.to_ascii_lowercase() {
             'u' => Some(Action::Undo),
             'e' => Some(Action::Redo),
+            'w' => Some(Action::RepeatSearch),
+            'a' => Some(Action::Mark),
+            'c' => Some(Action::ToggleCase),
+            'b' => Some(Action::ToggleBackwards),
             _ => None,
         },
         KeyCode::Char(c) => Some(Action::Insert(c)),
+        KeyCode::Esc => Some(Action::Escape),
         KeyCode::Enter => Some(Action::Newline),
         KeyCode::Tab => Some(Action::Tab),
         KeyCode::Backspace => Some(Action::Backspace),
@@ -119,6 +149,23 @@ mod tests {
         assert_eq!(c('v'), Some(Action::PageDown));
         assert_eq!(c('c'), Some(Action::Cancel));
         assert_eq!(c('q'), None);
+        assert_eq!(c('w'), Some(Action::Search));
+        assert_eq!(c('g'), Some(Action::Help));
+        assert_eq!(c('\\'), Some(Action::Replace));
+        assert_eq!(c('4'), Some(Action::Replace));
+        assert_eq!(c('_'), Some(Action::Goto));
+        assert_eq!(c('7'), Some(Action::Goto));
+        assert_eq!(c('6'), Some(Action::Mark));
+    }
+
+    #[test]
+    fn search_alt_bindings() {
+        let a = |ch| k(KeyCode::Char(ch), KeyModifiers::ALT);
+        assert_eq!(a('w'), Some(Action::RepeatSearch));
+        assert_eq!(a('a'), Some(Action::Mark));
+        assert_eq!(a('c'), Some(Action::ToggleCase));
+        assert_eq!(a('b'), Some(Action::ToggleBackwards));
+        assert_eq!(k(KeyCode::Esc, N), Some(Action::Escape));
     }
 
     #[test]
