@@ -251,7 +251,7 @@ pub fn render(ed: &Editor, width: usize, height: usize) -> Screen {
 fn status_line(ed: &Editor, width: usize) -> (String, Option<usize>) {
     if let (Some(label), Some(text)) = (ed.prompt_label(), ed.prompt_text()) {
         if ed.prompt_kind() == Some(crate::editor::PromptKind::SaveModified) {
-            return (fit(label, width), None);
+            return (fit(&label, width), None);
         }
         let prefix = format!("{label}: ");
         let full = format!("{prefix}{text}");
