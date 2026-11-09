@@ -2,12 +2,12 @@
 
 ## Stage 1: Core editor engine and file I/O
 Goal: a tested, UI-free editing core plus load/save.
-- [ ] Cargo project `nanorust` (lib + bin), CI-free; `cargo fmt`/`clippy` clean
-- [ ] `buffer`: insert/delete char, newline, backspace, cursor movement (char, word, line, page, file), UTF-8 safe
-- [ ] Selection, cut/copy/paste lines, cut-to-end
-- [ ] `undo` with redo
-- [ ] `fileio`: load, save, atomic write, CRLF/final-newline preservation, missing file = new buffer
-- [ ] `search`: forward/backward find, case toggle, replace one/all
+- [ ] Cargo project `nanorust` (lib + bin), CI-free; `cargo fmt`/`clippy` clean (fmt/clippy not installed; builds, unverified lint)
+- [x] `buffer`: insert/delete char, newline, backspace, cursor movement (char, word, line, page, file), UTF-8 safe
+- [x] Selection, cut/copy/paste lines, cut-to-end
+- [x] `undo` with redo
+- [x] `fileio`: load, save, atomic write, CRLF/final-newline preservation, missing file = new buffer
+- [x] `search`: forward/backward find, case toggle, replace one/all
 Acceptance: `cargo test` passes with unit tests for each module, including multibyte text, undo/redo
 round trips, and save→load identity on temp files.
 
