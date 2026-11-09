@@ -338,8 +338,8 @@ mod tests {
     #[test]
     fn layout_and_title() {
         let mut ed = ed_with("hi");
-        let mut ed = ed_with("hi");
         let s = scr(&mut ed, 80, 10);
+        assert_eq!(s.rows.len(), 10);
         assert!(s.rows.iter().all(|r| r.chars().count() == 80));
         assert!(s.rows[0].contains("NanoRust"));
         assert!(s.rows[0].contains("New Buffer"));
